@@ -150,7 +150,7 @@ async function send(btn, action, data, okMsg) {
   catch (x) { toast(x.message, true); busy(btn, false); }
 }
 // ---------- leave rights (sent up by HR; leave asked for since then is taken off here) ----------
-const n1 = v => { const x = Math.round((+v || 0) * 10) / 10; return String(x); };
+const n1 = v => { const x = Math.round((+v || 0) * 100) / 100; return String(x); };
 const isUnl = r => r.Quota === '' || r.Quota == null;
 // this person's right to a type in the leave year: left now, after the leave asked since HR's figures
 function rightOf(name, from) {
@@ -179,8 +179,9 @@ function pLeave() {
     <label>ประเภทการลา<select id="lt">${names.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
     <div id="lright" class="note"></div>
     <div class="two"><label>ตั้งแต่วันที่<input type="date" id="lf" value="${t}"></label><label>ถึงวันที่<input type="date" id="lto" value="${t}"></label></div>
-    <label id="halfL">ช่วงเวลา<select id="lh"><option value="">เต็มวัน</option><option>ครึ่งวันเช้า</option><option>ครึ่งวันบ่าย</option></select></label>
-    <div class="kv"><span>จำนวนวันลา (ไม่นับวันหยุด)</span><b id="ld"></b></div>
+    <label id="halfL">ช่วงเวลา<select id="lh"><option value="">เต็มวัน</option><option>ครึ่งวันเช้า</option><option>ครึ่งวันบ่าย</option><option value="H">รายชั่วโมง</option></select></label>
+    <div class="two" id="lhT" hidden><label>ตั้งแต่เวลา<input type="time" id="lts" value="${esc(S.me.shift ? S.me.shift.Start : '08:00')}"></label><label>ถึงเวลา<input type="time" id="lte"></label></div>
+    <div class="kv"><span id="ldL">จำนวนวันลา (ไม่นับวันหยุด)</span><b id="ld"></b></div>
     <label>เหตุผล<textarea id="lr" rows="2" maxlength="300"></textarea></label>
     <label class="cam" id="attL">📎 แนบรูปเอกสาร เช่น ใบรับรองแพทย์ (ถ้ามี)<input type="file" accept="image/*" id="att"></label><img id="pv" hidden>
     <button class="btn big primary" id="go">ส่งคำขอลา</button>
@@ -201,13 +202,35 @@ function pLeave() {
     if (r.Note) parts.push(`<span class="muted">${esc(r.Note)}</span>`);
     box.innerHTML = parts.join('<br>');
   };
-  const calc = () => { const f = $('#lf').value, to = $('#lto').value; $('#halfL').hidden = f !== to; if (f !== to) $('#lh').value = ''; const d = workDays(f, to, $('#lh').value); $('#ld').textContent = d + ' วัน'; right(d); };
-  ['#lt', '#lf', '#lto', '#lh'].forEach(s => $(s).onchange = () => { if ($('#lto').value < $('#lf').value) $('#lto').value = $('#lf').value; calc(); }); calc();
+  // by the hour: only types HR allows by the hour, one day; hours ÷ the hours of the person's shift = days
+  const rowOf = () => (L && L.rows || []).find(r => r.Name === $('#lt').value);
+  const hpd = () => { const r = rowOf(); if (r && +r.Hpd > 0) return +r.Hpd; const sh = S.me.shift; if (!sh) return 8; let m = minutesOf(sh.End) - minutesOf(sh.Start); if (m <= 0) m += 1440; return Math.max(1, (m - (+sh.BreakMin || 0)) / 60); };
+  const hours = () => { const a = $('#lts').value, b = $('#lte').value; if (!a || !b || b <= a) return 0; return Math.round((minutesOf(b) - minutesOf(a)) / 60 * 100) / 100; };
+  const amount = () => {
+    const f = $('#lf').value, to = $('#lto').value, h = $('#lh').value;
+    if (h !== 'H') return { days: workDays(f, to, h) };
+    const n = workDays(f, f, ''), hrs = hours();
+    return { days: n && hrs ? Math.min(1, Math.round(hrs / hpd() * 10000) / 10000) : 0, hrs };
+  };
+  const calc = () => {
+    const f = $('#lf').value, to = $('#lto').value, r = rowOf(), hourOk = !!(r && r.Hourly === 'Y'), opt = $('#lh option[value=H]');
+    opt.hidden = opt.disabled = !hourOk; if (!hourOk && $('#lh').value === 'H') $('#lh').value = '';
+    $('#halfL').hidden = f !== to; if (f !== to) $('#lh').value = '';
+    const hourly = $('#lh').value === 'H'; $('#lhT').hidden = !hourly;
+    const a = amount();
+    $('#ldL').textContent = hourly ? `จำนวนชั่วโมงลา (${n1(hpd())} ชม. = 1 วัน)` : 'จำนวนวันลา (ไม่นับวันหยุด)';
+    $('#ld').textContent = hourly ? (a.hrs ? `${a.hrs} ชม. = ${Math.round(a.days * 100) / 100} วัน` : '-') : a.days + ' วัน';
+    right(a.days);
+  };
+  ['#lt', '#lf', '#lto', '#lh', '#lts', '#lte'].forEach(s => $(s).onchange = () => { if ($('#lto').value < $('#lf').value) $('#lto').value = $('#lf').value; calc(); }); calc();
   $('#att').onchange = async e => { const f = e.target.files[0]; if (!f) return; att = await shrink(f, 1200); $('#pv').src = att; $('#pv').hidden = false; $('#attL').classList.add('done'); };
   $('#go').onclick = e => {
-    const days = workDays($('#lf').value, $('#lto').value, $('#lh').value);
-    if (!days) return toast('ช่วงวันที่เลือกเป็นวันหยุดทั้งหมด', true);
-    send(e.target, 'liff.leave', { leaveType: $('#lt').value, from: $('#lf').value, to: $('#lto').value, half: $('#lh').value, days, reason: $('#lr').value, attach: att }, 'ส่งคำขอลาแล้ว รออนุมัติ');
+    const a = amount(), hourly = $('#lh').value === 'H', r = rowOf();
+    if (hourly && !a.hrs) return toast('ระบุเวลาเริ่มและเวลาสิ้นสุด', true);
+    if (hourly && r && +r.MinHours && a.hrs < +r.MinHours) return toast(`${r.Name} ลารายชั่วโมงขั้นต่ำ ${r.MinHours} ชม.`, true);
+    if (!a.days) return toast(hourly ? 'วันที่เลือกเป็นวันหยุด' : 'ช่วงวันที่เลือกเป็นวันหยุดทั้งหมด', true);
+    send(e.target, 'liff.leave', Object.assign({ leaveType: $('#lt').value, from: $('#lf').value, to: $('#lto').value, half: hourly ? '' : $('#lh').value, days: a.days, reason: $('#lr').value, attach: att },
+      hourly ? { hours: a.hrs, tStart: $('#lts').value, tEnd: $('#lte').value } : {}), 'ส่งคำขอลาแล้ว รออนุมัติ');
   };
 }
 const minutesOf = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + m; };
@@ -236,7 +259,7 @@ function pFix() {
 function summary(r) {
   switch (r.sheet) {
     case 'TimeLog': return `${r.Type === 'IN' ? 'เข้า' : 'ออก'} ${hhmm(r.CreatedAt)} น. · ${r.InZone === 'Y' ? 'ในพื้นที่' : 'นอกพื้นที่ ' + (r.DistanceM || '') + ' ม.'}`;
-    case 'LeaveReq': return `${r.LeaveType} ${thDate(r.From)}${r.To !== r.From ? ' – ' + thDate(r.To) : ''} (${r.Days} วัน)${r.Half ? ' ' + r.Half : ''}`;
+    case 'LeaveReq': return `${r.LeaveType} ${thDate(r.From)}${r.To !== r.From ? ' – ' + thDate(r.To) : ''} ${+r.Hours > 0 ? `${r.StartTime}–${r.EndTime} (${r.Hours} ชม.)` : `(${r.Days} วัน)${r.Half ? ' ' + r.Half : ''}`}`;
     case 'OTReq': return `${thDate(r.Date)} ${r.Start}–${r.End} (${r.Hours} ชม.)`;
     case 'TimeFix': return `${thDate(r.Date)} ${r.Type === 'IN' ? 'เข้า' : 'ออก'} ${r.Time} น.`;
     case 'DeviceBind': return `ผูกบัญชี LINE ${r.DisplayName || ''}`;
