@@ -38,7 +38,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--acc); borde
 .kind { font-weight: 700; } .st { font-size: 13px; font-weight: 700; border-radius: 999px; padding: 0 10px; } .st.ok { background: #e2f6ee; } .st.bad { background: #fde8e7; } .st.warn { background: #fff3dc; color: var(--warn); }
 .mini { font: inherit; font-size: 13px; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 2px 10px; color: var(--bad); }
 .item .btn { width: 48%; margin-top: 8px; } .why { margin-top: 8px; }
-.note { padding: 10px 12px; border-radius: 10px; margin: 8px 0; font-size: 14px; background: #eef7f4; color: var(--text); } .note.warn { background: #fff3dc; color: var(--warn); } .note.bad { background: #fde8e7; color: var(--bad); } .note[hidden] { display: none; }
+.note { padding: 10px 12px; border-radius: 10px; margin: 8px 0; font-size: 14px; background: #eef7f4; color: var(--text); } .note.warn { background: #fff3dc; color: var(--warn); } .note.bad { background: #fde8e7; color: var(--bad); } .note[hidden], [hidden] { display: none !important; }
 .rights { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; } .rights th { text-align: left; color: var(--muted); font-weight: 600; font-size: 13px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
 .rights td { padding: 7px 6px; border-bottom: 1px dashed var(--line); vertical-align: top; } .rights td:nth-child(n+2), .rights th:nth-child(n+2) { text-align: right; } .rights tr.off td { color: var(--muted); }
 .err-card { border-top: 4px solid var(--bad); }
