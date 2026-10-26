@@ -149,10 +149,35 @@ async function send(btn, action, data, okMsg) {
   try { await call(action, Object.assign({ requestId: uid() }, data)); toast(okMsg); await loadMe(); pMine(); }
   catch (x) { toast(x.message, true); busy(btn, false); }
 }
+// ---------- leave rights (sent up by HR; leave asked for since then is taken off here) ----------
+const n1 = v => { const x = Math.round((+v || 0) * 10) / 10; return String(x); };
+const isUnl = r => r.Quota === '' || r.Quota == null;
+// this person's right to a type in the leave year: left now, after the leave asked since HR's figures
+function rightOf(name, from) {
+  const L = S.me.leave; if (!L || !L.rows || !L.rows.length) return null;
+  const r = L.rows.find(x => x.Name === name); if (!r) return { none: true };
+  const inYear = d => d >= r.CycleStart && d <= r.CycleEnd;
+  const since = (L.recent || []).filter(x => x.LeaveType === name && inYear(x.From)).reduce((s, x) => s + (+x.Days || 0), 0);
+  const left = isUnl(r) ? Infinity : (+r.Remaining || 0) - (+r.Pending || 0) - since;
+  const paidLeft = r.PaidLeft === '' || r.PaidLeft == null ? Infinity : (+r.PaidLeft || 0) - (+r.Pending || 0) - since;
+  return { r, since, left, paidLeft, outside: from && !inYear(from) };
+}
+function rightsCard() {
+  const L = S.me.leave; if (!L || !L.rows || !L.rows.length) return '';
+  return `<div class="card"><h2>สิทธิ์การลาของฉัน</h2><div class="muted">รอบ ${esc(L.rows[0].Cycle)} · ข้อมูลจากฝ่ายบุคคล ${esc(String(L.publishedAt || '').slice(0, 16).replace('T', ' '))}</div>
+    <table class="rights"><tr><th>ประเภท</th><th>สิทธิ์</th><th>ใช้แล้ว</th><th>คงเหลือ</th></tr>
+    ${L.rows.map(r => { const g = rightOf(r.Name), q = isUnl(r) ? 'ตามจริง' : n1(+r.Quota + (+r.CarryIn || 0));
+      const pend = (+r.Pending || 0) + g.since;
+      return `<tr class="${!isUnl(r) && +r.Quota === 0 && !(+r.Used > 0) ? 'off' : ''}"><td>${esc(r.Name)}${r.PaidLeft !== '' && +r.PayPct < 100 ? ` <span class="muted">(${esc(r.PayPct)}%)</span>` : ''}</td><td>${q}${+r.CarryIn ? `<div class="muted">ยกมา ${n1(r.CarryIn)}</div>` : ''}</td>
+        <td>${n1(r.Used)}${pend ? `<div class="muted">รอ ${n1(pend)}</div>` : ''}</td><td><b class="${!isUnl(r) && g.left <= 0 && +r.Quota > 0 ? 'bad' : ''}">${isUnl(r) ? (r.PaidLeft === '' ? 'ตามจริง' : +r.PaidLeft === 0 ? 'ไม่ได้ค่าจ้าง' : `ได้ค่าจ้างอีก ${n1(Math.max(0, g.paidLeft))}`) : n1(Math.max(0, g.left))}</b>${!isUnl(r) && +r.Quota === 0 && r.Why ? `<div class="muted">${esc(r.Why)}</div>` : ''}</td></tr>`; }).join('')}
+    </table></div>`;
+}
 function pLeave() {
-  const t = todayIso();
-  view(`${back}<div class="card"><h2>ขอลา</h2>
-    <label>ประเภทการลา<select id="lt">${C.LEAVE_TYPES.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
+  const t = todayIso(), L = S.me.leave, rows = L && L.rows && L.rows.length ? L.rows.filter(r => isUnl(r) || +r.Quota > 0 || +r.Used > 0) : null;
+  const names = rows ? rows.map(r => r.Name) : C.LEAVE_TYPES;
+  view(`${back}${rightsCard()}<div class="card"><h2>ขอลา</h2>
+    <label>ประเภทการลา<select id="lt">${names.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
+    <div id="lright" class="note"></div>
     <div class="two"><label>ตั้งแต่วันที่<input type="date" id="lf" value="${t}"></label><label>ถึงวันที่<input type="date" id="lto" value="${t}"></label></div>
     <label id="halfL">ช่วงเวลา<select id="lh"><option value="">เต็มวัน</option><option>ครึ่งวันเช้า</option><option>ครึ่งวันบ่าย</option></select></label>
     <div class="kv"><span>จำนวนวันลา (ไม่นับวันหยุด)</span><b id="ld"></b></div>
@@ -161,8 +186,23 @@ function pLeave() {
     <button class="btn big primary" id="go">ส่งคำขอลา</button>
     <p class="hint">ผู้อนุมัติ: ${esc(S.me.emp.ApproverName || '-')} · ลาป่วยตั้งแต่ 3 วันทำงานขึ้นไป นายจ้างขอใบรับรองแพทย์ได้</p></div>`);
   let att = '';
-  const calc = () => { const f = $('#lf').value, to = $('#lto').value; $('#halfL').hidden = f !== to; if (f !== to) $('#lh').value = ''; $('#ld').textContent = workDays(f, to, $('#lh').value) + ' วัน'; };
-  ['#lf', '#lto', '#lh'].forEach(s => $(s).onchange = () => { if ($('#lto').value < $('#lf').value) $('#lto').value = $('#lf').value; calc(); }); calc();
+  // what this request does to the right: days left after it, days beyond the paid ones
+  const right = days => {
+    const box = $('#lright'), g = rightOf($('#lt').value, $('#lf').value);
+    box.className = 'note'; box.hidden = !g;
+    if (!g) return;
+    if (g.none) { box.textContent = 'ไม่มีประเภทการลานี้ในสิทธิ์ของคุณ'; box.className = 'note bad'; return; }
+    if (g.outside) { box.textContent = `วันที่ลาอยู่นอกรอบ ${g.r.Cycle} · สิทธิ์ของรอบใหม่จะแสดงเมื่อฝ่ายบุคคลปรับข้อมูล`; box.className = 'note warn'; return; }
+    const r = g.r, parts = [];
+    if (isUnl(r)) parts.push(`${esc(r.Name)}: ลาได้ตามจริง`);
+    else { const after = g.left - days; parts.push(`คงเหลือ <b>${n1(Math.max(0, g.left))}</b> วัน → หลังลานี้ <b>${n1(after)}</b> วัน`); if (after < 0) { parts.push(`<b>เกินสิทธิ์ ${n1(-after)} วัน</b> ผู้อนุมัติอาจไม่อนุมัติ`); box.className = 'note bad'; } }
+    if (g.paidLeft !== Infinity) { const unpaid = Math.max(0, days - Math.max(0, g.paidLeft)); if (unpaid > 0) { parts.push(`${n1(unpaid)} วันไม่ได้รับค่าจ้าง`); if (box.className === 'note') box.className = 'note warn'; } else parts.push(`ได้รับค่าจ้างอีก ${n1(Math.max(0, g.paidLeft))} วัน`); }
+    if (+r.PayPct < 100 && r.PaidLeft !== '' && +r.PaidLeft > 0) parts.push(`ค่าจ้างระหว่างลา ${esc(r.PayPct)}%`);
+    if (r.Note) parts.push(`<span class="muted">${esc(r.Note)}</span>`);
+    box.innerHTML = parts.join('<br>');
+  };
+  const calc = () => { const f = $('#lf').value, to = $('#lto').value; $('#halfL').hidden = f !== to; if (f !== to) $('#lh').value = ''; const d = workDays(f, to, $('#lh').value); $('#ld').textContent = d + ' วัน'; right(d); };
+  ['#lt', '#lf', '#lto', '#lh'].forEach(s => $(s).onchange = () => { if ($('#lto').value < $('#lf').value) $('#lto').value = $('#lf').value; calc(); }); calc();
   $('#att').onchange = async e => { const f = e.target.files[0]; if (!f) return; att = await shrink(f, 1200); $('#pv').src = att; $('#pv').hidden = false; $('#attL').classList.add('done'); };
   $('#go').onclick = e => {
     const days = workDays($('#lf').value, $('#lto').value, $('#lh').value);
