@@ -1,8 +1,9 @@
 // © 2569 S.SUPHAWAN. All rights reserved. Developed by MEAWMEAW
 // 4Source HR · staff web page: check in/out with GPS + selfie, leave / OT / time-correction requests, approvals.
-// Opens in any phone browser (or from the company's LINE menu). The person signs in with employee code + 6-digit PIN;
+// Opens in any phone browser and can be added to the home screen. The person signs in with employee code + 6-digit PIN;
 // the Apps Script web app (gas\Code.gs) gives a signed session that is kept on the phone for 60 days, checks it on
-// every call, and keeps the time of every record itself.
+// every call, and keeps the time of every record itself. Notices (decisions on my requests, requests waiting for me)
+// are shown here: on the home page, on the app icon's badge where the phone supports it, refreshed while the page is open.
 'use strict';
 const C = window.HR_CONFIG;
 const SKEY = 'hr_session', CKEY = 'hr_code';
@@ -17,7 +18,7 @@ const thDate = iso => iso ? new Intl.DateTimeFormat('th-TH', { day: 'numeric', m
 const thDay = iso => new Intl.DateTimeFormat('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(iso + 'T00:00:00'));
 const hhmm = s => String(s || '').slice(11, 16);
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2));
-const KIND = { TimeLog: 'ลงเวลา', LeaveReq: 'ขอลา', OTReq: 'ขอ OT', TimeFix: 'ขอแก้เวลา', DeviceBind: 'ผูกบัญชี LINE' };
+const KIND = { TimeLog: 'ลงเวลา', LeaveReq: 'ขอลา', OTReq: 'ขอ OT', TimeFix: 'ขอแก้เวลา' };
 
 // ---------- server ----------
 async function call(action, data = {}) {
@@ -51,13 +52,42 @@ async function boot() {
   try { await loadMe(); start(); }
   catch (e) { if (!e.handled) view(`<div class="card err-card"><h2>เปิดหน้าไม่สำเร็จ</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">ลองใหม่</button></div>`); }
 }
-async function loadMe() { S.me = await call('liff.me'); $('#org').textContent = S.me.org || ''; }
-// after signing in: HR's PIN is changed first, then the page asked for (a link from a notification may ask for approvals)
+async function loadMe() { S.me = await call('web.me'); $('#org').textContent = S.me.org || ''; badge(); }
+// after signing in: HR's PIN is changed first, then the page asked for (a link may ask for approvals: ?p=approve)
 function start() { if (S.me.mustChange) return pPin(true); const p = S.page; S.page = 'home'; go(p); }
 function go(p) {
   if (!S.me) return pLogin();
+  S.cur = p;
   ({ home: pHome, clock: pClock, leave: pLeave, ot: pOt, fix: pFix, mine: pMine, approve: pApprove, pin: () => pPin(false) }[p] || pHome)();
 }
+
+// ---------- notices (in place of LINE messages) ----------
+// decisions on my requests since I last looked (kept per person on this phone), and requests waiting for me
+const seenKey = () => 'hr_seen_' + (S.me && S.me.emp ? S.me.emp.Code : '');
+const tsOf = s => String(s || '').replace(' ', 'T');
+const unseen = () => (S.me && S.me.news || []).filter(n => tsOf(n.UpdatedAt) > store.get(seenKey()));
+function markSeen() { const n = (S.me && S.me.news || [])[0]; if (n) store.set(seenKey(), tsOf(n.UpdatedAt)); badge(); }
+function badge() {
+  const k = (S.me ? (S.me.waiting || 0) : 0) + unseen().length;
+  try { if (navigator.setAppBadge) k ? navigator.setAppBadge(k) : navigator.clearAppBadge(); } catch { }
+  document.title = (k ? `(${k}) ` : '') + '4Source HR';
+}
+function newsCard() {
+  const m = S.me, list = unseen(), out = [];
+  if (m.approver && m.waiting) out.push(`<button class="card notice ap" data-go="approve"><b>✅ มีคำขอรอคุณอนุมัติ ${m.waiting} รายการ</b><span>แตะเพื่อดูและอนุมัติ ›</span></button>`);
+  if (list.length) out.push(`<div class="card notice"><div class="row"><b>🔔 ผลคำขอของคุณ (${list.length})</b><button class="mini" data-seen>รับทราบ</button></div>
+    ${list.slice(0, 5).map(n => `<div class="nrow"><span class="st ${stCls(n.Status)}">${esc(n.Status)}</span> ${esc(KIND[n.sheet] || '')} ${esc(summary(n))}${n.ApproveNote ? `<div class="muted">หมายเหตุ: ${esc(n.ApproveNote)}</div>` : ''}</div>`).join('')}
+    ${list.length > 5 ? `<button class="mini" data-go="mine">ดูทั้งหมด ›</button>` : ''}</div>`);
+  return out.join('');
+}
+document.addEventListener('click', e => { if (e.target.closest('[data-seen]')) { markSeen(); if (S.cur === 'home') pHome(); } });
+// while the page is open: fresh figures when it comes back to the screen, and every 2 minutes on the home page
+async function refresh() {
+  if (!S.session || !S.me || document.hidden) return;
+  try { await loadMe(); if (S.cur === 'home' && !document.querySelector('input:focus, textarea:focus')) pHome(); } catch { }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+setInterval(() => { if (S.cur === 'home') refresh(); }, 120000);
 document.addEventListener('click', e => { const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go); });
 
 // ---------- sign in: employee code + PIN; first time: ID card's last 4 digits + a new PIN ----------
@@ -138,6 +168,7 @@ function pHome() {
   view(`<div class="card hello"><div class="av">${esc((e.Name || '?').replace(/^(นาย|นางสาว|นาง)/, '')[0] || '?')}</div>
       <div><b>${esc(e.Name)}</b>${e.Nick ? ` <span class="muted">(${esc(e.Nick)})</span>` : ''}<div class="muted">${esc(e.Position || '')} · ${esc(e.Unit || '')}</div>
       <div class="muted">${esc(e.Code)}${e.ApproverName ? ' · ผู้อนุมัติ ' + esc(e.ApproverName) : ''}</div></div></div>
+    ${newsCard()}
     <div class="card today"><div class="row"><b>${thDay(todayIso())}</b>${m.shift ? `<span class="chip">${esc(m.shift.Name)} ${esc(m.shift.Start)}–${esc(m.shift.End)}</span>` : ''}</div>
       ${logs.length ? `<ul class="logs">${logs.map(l => `<li><span class="t ${l.Type === 'IN' ? 'in' : 'out'}">${l.Type === 'IN' ? 'เข้า' : 'ออก'}</span><b>${hhmm(l.CreatedAt)} น.</b>${l.InZone === 'Y' ? '<span class="ok">ในพื้นที่</span>' : `<span class="bad">นอกพื้นที่${l.DistanceM ? ' ' + l.DistanceM + ' ม.' : ''}</span>`}${l.Status === 'รอยืนยัน' ? '<span class="chip warn">รอหัวหน้ายืนยัน</span>' : ''}</li>`).join('')}</ul>` : '<p class="muted">วันนี้ยังไม่ได้ลงเวลา</p>'}
       <button class="btn big ${nt === 'IN' ? 'primary' : 'out'}" data-go="clock">${nt === 'IN' ? '⏱ ลงเวลาเข้างาน' : '⏱ ลงเวลาออกงาน'}</button></div>
@@ -145,11 +176,11 @@ function pHome() {
       <button class="tile" data-go="leave"><i>🗓</i>ขอลา</button>
       <button class="tile" data-go="ot"><i>🌙</i>ขอ OT</button>
       <button class="tile" data-go="fix"><i>✏️</i>ขอแก้เวลา</button>
-      <button class="tile" data-go="mine"><i>📄</i>คำขอของฉัน</button>
+      <button class="tile" data-go="mine"><i>📄</i>คำขอของฉัน${unseen().length ? `<em>${unseen().length}</em>` : ''}</button>
       ${m.approver ? `<button class="tile ap" data-go="approve"><i>✅</i>รออนุมัติ${m.waiting ? `<em>${m.waiting}</em>` : ''}</button>` : ''}
     </div>
     ${installCard()}
-    <div class="foot-links">${m.web ? `<button class="mini" data-go="pin">🔑 เปลี่ยน PIN</button><button class="mini" data-logout>ออกจากระบบ</button>` : ''}</div>`);
+    <div class="foot-links"><button class="mini" data-go="pin">🔑 เปลี่ยน PIN</button><button class="mini" data-logout>ออกจากระบบ</button></div>`);
 }
 
 // ---------- check in / out ----------
@@ -171,12 +202,12 @@ function pClock() {
     const inZ = site && d - Math.min(p.coords.accuracy, 100) <= +site.Radius;
     $('#gps').innerHTML = `<b class="${inZ ? 'ok' : 'bad'}">${site ? (inZ ? '✓ อยู่ในพื้นที่' : '✗ อยู่นอกพื้นที่') : 'ไม่มีสถานที่ที่กำหนด'}</b>${d != null ? ` · ห่าง ${d.toLocaleString()} ม.` : ''} <span class="muted">(ความแม่นยำ ±${Math.round(p.coords.accuracy)} ม.)</span>`;
     ready();
-  }, err => { $('#gps').innerHTML = `<span class="bad">หาตำแหน่งไม่ได้: ${esc(err.message)} · เปิด Location ในมือถือ และอนุญาตให้เบราว์เซอร์ (หรือ LINE) ใช้ตำแหน่ง แล้วลองใหม่</span>`; }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  }, err => { $('#gps').innerHTML = `<span class="bad">หาตำแหน่งไม่ได้: ${esc(err.message)} · เปิด Location ในมือถือ และอนุญาตให้เบราว์เซอร์ใช้ตำแหน่ง แล้วลองใหม่</span>`; }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
   $('#cam').onchange = async e => { const f = e.target.files[0]; if (!f) return; st.photo = await shrink(f, 480); $('#pv').src = st.photo; $('#pv').hidden = false; $('#camLbl').classList.add('done'); ready(); };
   $('#go').onclick = async e => {
     busy(e.target, true, 'กำลังบันทึก…');
     try {
-      const r = await call('liff.clock', { lat: st.pos.latitude, lng: st.pos.longitude, accuracy: st.pos.accuracy, photo: st.photo, note: $('#note').value, type: nt, requestId: uid() });
+      const r = await call('web.clock', { lat: st.pos.latitude, lng: st.pos.longitude, accuracy: st.pos.accuracy, photo: st.photo, note: $('#note').value, type: nt, requestId: uid() });
       toast(`ลงเวลา${r.type === 'IN' ? 'เข้า' : 'ออก'} ${r.time || ''} น. ${r.inZone ? 'เรียบร้อย' : '(นอกพื้นที่ รอหัวหน้ายืนยัน)'}`);
       await loadMe(); go('home');
     } catch (x) { toast(x.message, true); busy(e.target, false); }
@@ -286,7 +317,7 @@ function pLeave() {
     if (hourly && !a.hrs) return toast('ระบุเวลาเริ่มและเวลาสิ้นสุด', true);
     if (hourly && r && +r.MinHours && a.hrs < +r.MinHours) return toast(`${r.Name} ลารายชั่วโมงขั้นต่ำ ${r.MinHours} ชม.`, true);
     if (!a.days) return toast(hourly ? 'วันที่เลือกเป็นวันหยุด' : 'ช่วงวันที่เลือกเป็นวันหยุดทั้งหมด', true);
-    send(e.target, 'liff.leave', Object.assign({ leaveType: $('#lt').value, from: $('#lf').value, to: $('#lto').value, half: hourly ? '' : $('#lh').value, days: a.days, reason: $('#lr').value, attach: att },
+    send(e.target, 'web.leave', Object.assign({ leaveType: $('#lt').value, from: $('#lf').value, to: $('#lto').value, half: hourly ? '' : $('#lh').value, days: a.days, reason: $('#lr').value, attach: att },
       hourly ? { hours: a.hrs, tStart: $('#lts').value, tEnd: $('#lte').value } : {}), 'ส่งคำขอลาแล้ว รออนุมัติ');
   };
 }
@@ -302,7 +333,7 @@ function pOt() {
     <p class="hint">ขออนุมัติก่อนทำ · ระบบจ่ายตามชั่วโมงที่อนุมัติและไม่เกินเวลาที่ลงออกจริง · OT รวมทำงานวันหยุดไม่เกิน 36 ชม./สัปดาห์</p></div>`);
   const hrs = () => { if (!$('#oe').value) return 0; let d = minutesOf($('#oe').value) - minutesOf($('#os').value); if (d <= 0) d += 1440; return Math.round(d / 60 * 100) / 100; };
   ['#os', '#oe'].forEach(s => $(s).oninput = () => $('#oh').textContent = hrs() ? hrs() + ' ชม.' : '-');
-  $('#go').onclick = e => { if (!hrs()) return toast('ระบุเวลาสิ้นสุด', true); send(e.target, 'liff.ot', { date: $('#od').value, start: $('#os').value, end: $('#oe').value, hours: hrs(), reason: $('#or').value }, 'ส่งคำขอ OT แล้ว รออนุมัติ'); };
+  $('#go').onclick = e => { if (!hrs()) return toast('ระบุเวลาสิ้นสุด', true); send(e.target, 'web.ot', { date: $('#od').value, start: $('#os').value, end: $('#oe').value, hours: hrs(), reason: $('#or').value }, 'ส่งคำขอ OT แล้ว รออนุมัติ'); };
 }
 function pFix() {
   view(`${back}<div class="card"><h2>ขอแก้เวลา (ลืมลงเวลา)</h2>
@@ -310,7 +341,7 @@ function pFix() {
     <div class="two"><label>รายการ<select id="ft"><option value="IN">เวลาเข้า</option><option value="OUT">เวลาออก</option></select></label><label>เวลา<input type="time" id="fti"></label></div>
     <label>เหตุผล (จำเป็น)<textarea id="fr" rows="2" maxlength="300" placeholder="เช่น โทรศัพท์แบตหมด"></textarea></label>
     <button class="btn big primary" id="go">ส่งคำขอแก้เวลา</button></div>`);
-  $('#go').onclick = e => send(e.target, 'liff.fix', { date: $('#fd').value, type: $('#ft').value, time: $('#fti').value, reason: $('#fr').value }, 'ส่งคำขอแก้เวลาแล้ว รออนุมัติ');
+  $('#go').onclick = e => send(e.target, 'web.fix', { date: $('#fd').value, type: $('#ft').value, time: $('#fti').value, reason: $('#fr').value }, 'ส่งคำขอแก้เวลาแล้ว รออนุมัติ');
 }
 // one line of what a record is about
 function summary(r) {
@@ -319,7 +350,6 @@ function summary(r) {
     case 'LeaveReq': return `${r.LeaveType} ${thDate(r.From)}${r.To !== r.From ? ' – ' + thDate(r.To) : ''} ${+r.Hours > 0 ? `${r.StartTime}–${r.EndTime} (${r.Hours} ชม.)` : `(${r.Days} วัน)${r.Half ? ' ' + r.Half : ''}`}`;
     case 'OTReq': return `${thDate(r.Date)} ${r.Start}–${r.End} (${r.Hours} ชม.)`;
     case 'TimeFix': return `${thDate(r.Date)} ${r.Type === 'IN' ? 'เข้า' : 'ออก'} ${r.Time} น.`;
-    case 'DeviceBind': return `ผูกบัญชี LINE ${r.DisplayName || ''}`;
   }
   return '';
 }
@@ -327,25 +357,26 @@ const stCls = s => /^อนุมัติ|ยืนยันแล้ว|บั
 async function pMine() {
   view(`${back}<div class="card"><h2>คำขอและการลงเวลาของฉัน</h2><div id="list" class="loading"><i></i>กำลังโหลด…</div></div>`);
   try {
-    const r = await call('liff.mine');
+    const r = await call('web.mine');
+    markSeen();   // the decisions are in front of the person now
     $('#list').className = '';
     $('#list').innerHTML = r.rows.length ? r.rows.map(x => `<div class="item"><div class="row"><span class="kind">${KIND[x.sheet]}</span><span class="st ${stCls(x.Status)}">${esc(x.Status)}</span></div>
       <div>${esc(summary(x))}</div>${x.Reason ? `<div class="muted">${esc(x.Reason)}</div>` : ''}${x.ApproveNote ? `<div class="muted">หมายเหตุผู้อนุมัติ: ${esc(x.ApproveNote)}</div>` : ''}
-      <div class="row"><span class="muted">ส่งเมื่อ ${thDate(x.CreatedAt)} ${hhmm(x.CreatedAt)} น.</span>${x.Status === 'รออนุมัติ' && x.sheet !== 'DeviceBind' ? `<button class="mini" data-cancel="${esc(x.sheet)}|${esc(x.RequestID)}">ยกเลิก</button>` : ''}</div></div>`).join('') : '<p class="muted">ยังไม่มีรายการ</p>';
+      <div class="row"><span class="muted">ส่งเมื่อ ${thDate(x.CreatedAt)} ${hhmm(x.CreatedAt)} น.</span>${x.Status === 'รออนุมัติ' && KIND[x.sheet] && x.sheet !== 'TimeLog' ? `<button class="mini" data-cancel="${esc(x.sheet)}|${esc(x.RequestID)}">ยกเลิก</button>` : ''}</div></div>`).join('') : '<p class="muted">ยังไม่มีรายการ</p>';
   } catch (x) { if (!x.handled && $('#list')) $('#list').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
 }
 document.addEventListener('click', async e => {
   const c = e.target.closest('[data-cancel]'); if (!c) return;
   if (!confirm('ยกเลิกคำขอนี้?')) return;
   const [sheet, id] = c.dataset.cancel.split('|'); busy(c, true, '…');
-  try { await call('liff.cancel', { sheet, id }); toast('ยกเลิกแล้ว'); pMine(); } catch (x) { toast(x.message, true); busy(c, false); }
+  try { await call('web.cancel', { sheet, id }); toast('ยกเลิกแล้ว'); pMine(); } catch (x) { toast(x.message, true); busy(c, false); }
 });
 
 // ---------- approvals ----------
 async function pApprove() {
   view(`${back}<div class="card"><h2>รออนุมัติ</h2><div id="list" class="loading"><i></i>กำลังโหลด…</div></div>`);
   try {
-    const r = await call('liff.pending');
+    const r = await call('web.pending');
     $('#list').className = '';
     $('#list').innerHTML = r.rows.length ? r.rows.map(x => `<div class="item" data-id="${esc(x.RequestID)}"><div class="row"><span class="kind">${x.sheet === 'TimeLog' ? 'ลงเวลานอกพื้นที่' : KIND[x.sheet]}</span><span class="muted">${thDate(x.CreatedAt)} ${hhmm(x.CreatedAt)}</span></div>
       <b>${esc(x.EmpName)}</b><div>${esc(summary(x))}</div>${x.Reason || x.Note ? `<div class="muted">${esc(x.Reason || x.Note)}</div>` : ''}
@@ -359,7 +390,7 @@ document.addEventListener('click', async e => {
   const [decision, sheet, id] = b.dataset.dec.split('|'), item = b.closest('.item'), note = item.querySelector('.why').value.trim();
   if (decision === 'no' && !note) { item.querySelector('.why').focus(); return toast('กรุณาระบุเหตุผลที่ไม่อนุมัติ', true); }
   busy(b, true, '…');
-  try { const r = await call('liff.decide', { sheet, id, decision, note }); toast(r.status); item.remove(); S.me.waiting = Math.max(0, (S.me.waiting || 1) - 1); if (!$('#list .item')) $('#list').innerHTML = '<p class="muted">ไม่มีรายการรออนุมัติ 🎉</p>'; }
+  try { const r = await call('web.decide', { sheet, id, decision, note }); toast(r.status); item.remove(); S.me.waiting = Math.max(0, (S.me.waiting || 1) - 1); if (!$('#list .item')) $('#list').innerHTML = '<p class="muted">ไม่มีรายการรออนุมัติ 🎉</p>'; }
   catch (x) { toast(x.message, true); busy(b, false); }
 });
 
