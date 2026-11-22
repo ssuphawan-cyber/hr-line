@@ -1,10 +1,13 @@
 // © 2569 S.SUPHAWAN. All rights reserved. Developed by MEAWMEAW
-// 4Source HR · LINE page (LIFF): check in/out with GPS + selfie, leave / OT / time-correction requests, approvals.
-// Everything goes to the Apps Script web app (gas\Code.gs) with the person's LINE ID token; the server checks it with
-// LINE, finds the employee linked to that LINE account, and keeps the time of every record itself.
+// 4Source HR · staff web page: check in/out with GPS + selfie, leave / OT / time-correction requests, approvals.
+// Opens in any phone browser (or from the company's LINE menu). The person signs in with employee code + 6-digit PIN;
+// the Apps Script web app (gas\Code.gs) gives a signed session that is kept on the phone for 60 days, checks it on
+// every call, and keeps the time of every record itself.
 'use strict';
 const C = window.HR_CONFIG;
-const S = { token: '', me: null };
+const SKEY = 'hr_session', CKEY = 'hr_code';
+const store = { get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } }, set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch { } } };
+const S = { session: store.get(SKEY), me: null, page: '' };
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const pad = n => String(n).padStart(2, '0');
@@ -19,12 +22,18 @@ const KIND = { TimeLog: 'ลงเวลา', LeaveReq: 'ขอลา', OTReq: '
 // ---------- server ----------
 async function call(action, data = {}) {
   let r;
-  try { r = await fetch(C.GAS_URL, { method: 'POST', body: JSON.stringify(Object.assign({ action, idToken: S.token }, data)) }); }
+  try { r = await fetch(C.GAS_URL, { method: 'POST', body: JSON.stringify(Object.assign({ action, session: S.session }, data)) }); }
   catch { throw new Error('เชื่อมต่อไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่'); }
   const j = await r.json().catch(() => ({ ok: false, error: 'ระบบตอบกลับผิดรูปแบบ' }));
-  if (!j.ok) throw new Error(j.error || 'เกิดข้อผิดพลาด');
+  if (!j.ok) {
+    const e = new Error(j.error || 'เกิดข้อผิดพลาด'); e.first = !!j.first;
+    if (j.auth) { signOut(); toast(e.message, true); pLogin(); e.handled = true; }
+    throw e;
+  }
   return j;
 }
+function signIn(r) { S.session = r.session; store.set(SKEY, r.session); }
+function signOut() { S.session = ''; S.me = null; store.set(SKEY, ''); }
 function toast(msg, err) {
   const t = $('#toast'); t.textContent = (err ? '⚠ ' : '✓ ') + msg; t.className = 'show' + (err ? ' err' : '');
   clearTimeout(t._h); t._h = setTimeout(() => t.className = '', err ? 6000 : 3500);
@@ -36,44 +45,91 @@ const back = `<button class="back" data-go="home">‹ กลับหน้า�
 // ---------- start ----------
 async function boot() {
   const q = new URLSearchParams(location.search);
-  try {
-    if (q.get('dev')) S.token = 'dev:' + q.get('dev');   // testing in a browser (the server accepts it only in DEV_MODE)
-    else {
-      if (!C.LIFF_ID) throw new Error('ยังไม่ได้ตั้งค่า LIFF_ID ในไฟล์ config.js');
-      await liff.init({ liffId: C.LIFF_ID });
-      if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
-      S.token = liff.getIDToken();
-    }
-    await loadMe();
-    go(q.get('p') || 'home');
-  } catch (e) { view(`<div class="card err-card"><h2>เปิดหน้าไม่สำเร็จ</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">ลองใหม่</button></div>`); }
+  S.page = q.get('p') || 'home';
+  if (!C.GAS_URL) return view(`<div class="card err-card"><h2>ยังไม่ได้ตั้งค่า</h2><p>ใส่ GAS_URL ในไฟล์ config.js</p></div>`);
+  if (!S.session) return pLogin();
+  try { await loadMe(); start(); }
+  catch (e) { if (!e.handled) view(`<div class="card err-card"><h2>เปิดหน้าไม่สำเร็จ</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">ลองใหม่</button></div>`); }
 }
 async function loadMe() { S.me = await call('liff.me'); $('#org').textContent = S.me.org || ''; }
+// after signing in: HR's PIN is changed first, then the page asked for (a link from a notification may ask for approvals)
+function start() { if (S.me.mustChange) return pPin(true); const p = S.page; S.page = 'home'; go(p); }
 function go(p) {
-  if (!S.me.bound) return pBind();
-  ({ home: pHome, clock: pClock, leave: pLeave, ot: pOt, fix: pFix, mine: pMine, approve: pApprove }[p] || pHome)();
+  if (!S.me) return pLogin();
+  ({ home: pHome, clock: pClock, leave: pLeave, ot: pOt, fix: pFix, mine: pMine, approve: pApprove, pin: () => pPin(false) }[p] || pHome)();
 }
 document.addEventListener('click', e => { const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go); });
 
-// ---------- link LINE to an employee ----------
-function pBind() {
-  const m = S.me;
-  view(`<div class="card"><h2>ผูกบัญชี LINE กับพนักงาน</h2>
-    <p class="muted">สวัสดี ${esc(m.lineName || '')} · ทำครั้งเดียว เพื่อให้ระบบรู้ว่าบัญชี LINE นี้เป็นของพนักงานคนไหน</p>
-    ${m.pendingBind ? '<div class="note warn">ส่งคำขอผูกบัญชีแล้ว รอฝ่ายบุคคลตรวจสอบ (เมื่ออนุมัติแล้ว ปิดแล้วเปิดหน้านี้ใหม่)</div>' : ''}
-    <label>รหัสพนักงาน<input id="bCode" autocapitalize="characters" placeholder="เช่น EMP0012"></label>
-    <label>เลขบัตรประชาชน 4 หลักท้าย<input id="bLast4" inputmode="numeric" maxlength="4" placeholder="xxxx"></label>
-    <button class="btn primary" id="bGo">ผูกบัญชี</button>
-    <p class="hint">ระบบไม่เก็บเลขบัตรของคุณบนอินเทอร์เน็ต ใช้ตรวจเทียบกับข้อมูลที่ฝ่ายบุคคลมีเท่านั้น · กรอกผิดได้ไม่เกิน 5 ครั้งต่อชั่วโมง</p></div>`);
-  $('#bGo').onclick = async e => {
-    busy(e.target, true);
+// ---------- sign in: employee code + PIN; first time: ID card's last 4 digits + a new PIN ----------
+const pinInput = (id, label, auto) => `<label>${label}<input id="${id}" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="${auto}" placeholder="••••••"></label>`;
+const digits = v => String(v || '').replace(/\D/g, '');
+function pLogin(first, typed) {
+  const code = typed || store.get(CKEY);
+  view(`<div class="card login"><h2>เข้าสู่ระบบพนักงาน</h2>
+    <div class="seg"><button class="${first ? '' : 'on'}" data-login="0">เข้าสู่ระบบ</button><button class="${first ? 'on' : ''}" data-login="1">เข้าใช้ครั้งแรก</button></div>
+    <label>รหัสพนักงาน<input id="lCode" autocapitalize="characters" autocomplete="username" value="${esc(code)}" placeholder="เช่น EMP0012"></label>
+    ${first ? `<label>เลขบัตรประชาชน 4 หลักท้าย<input id="lLast4" inputmode="numeric" maxlength="4" placeholder="xxxx"></label>
+      ${pinInput('lPin', 'ตั้ง PIN ใหม่ (ตัวเลข 6 หลัก)', 'new-password')}${pinInput('lPin2', 'ยืนยัน PIN อีกครั้ง', 'new-password')}
+      <button class="btn big primary" id="lGo">ตั้ง PIN และเข้าใช้</button>
+      <p class="hint">ใช้ได้เมื่อฝ่ายบุคคลมีเลขบัตรประชาชนของคุณ · ระบบไม่เก็บเลขบัตรบนอินเทอร์เน็ต ใช้ตรวจเทียบเท่านั้น · ถ้าไม่ผ่าน ขอ PIN จากฝ่ายบุคคล</p>`
+    : `${pinInput('lPin', 'PIN 6 หลัก', 'current-password')}
+      <button class="btn big primary" id="lGo">เข้าสู่ระบบ</button>
+      <p class="hint">ยังไม่มี PIN? เลือก “เข้าใช้ครั้งแรก” หรือขอใบแจ้ง PIN จากฝ่ายบุคคล · ลืม PIN ติดต่อฝ่ายบุคคล · กรอกผิด 5 ครั้งต้องรอ 15 นาที</p>`}</div>
+    ${installCard()}`);
+  $('#lCode').oninput = e => { e.target.value = e.target.value.toUpperCase(); };
+  (code ? (first ? $('#lLast4') : $('#lPin')) : $('#lCode')).focus();
+  const enter = e => { if (e.key === 'Enter') $('#lGo').click(); };
+  document.querySelectorAll('.login input').forEach(i => i.onkeydown = enter);
+  $('#lGo').onclick = async e => {
+    const c = $('#lCode').value.trim().toUpperCase(), pin = digits($('#lPin').value);
+    if (!c) return toast('กรอกรหัสพนักงาน', true);
+    if (pin.length !== 6) return toast('PIN ต้องเป็นตัวเลข 6 หลัก', true);
+    if (first && digits($('#lLast4').value).length !== 4) return toast('กรอกเลขบัตรประชาชน 4 หลักท้าย', true);
+    if (first && pin !== digits($('#lPin2').value)) return toast('PIN ทั้งสองช่องไม่ตรงกัน', true);
+    busy(e.target, true, 'กำลังตรวจสอบ…');
     try {
-      const r = await call('liff.bind', { code: $('#bCode').value, last4: $('#bLast4').value, requestId: uid() });
-      if (r.linked) { toast('ผูกบัญชีเรียบร้อย'); await loadMe(); go('home'); }
-      else { toast('ส่งคำขอแล้ว รอฝ่ายบุคคลตรวจสอบ'); S.me.pendingBind = true; pBind(); }
-    } catch (x) { toast(x.message, true); busy(e.target, false); }
+      const r = first ? await call('web.first', { code: c, last4: digits($('#lLast4').value), pin }) : await call('web.login', { code: c, pin });
+      store.set(CKEY, c); signIn(r);
+      await loadMe(); toast(first ? 'ตั้ง PIN เรียบร้อย' : 'เข้าสู่ระบบแล้ว'); start();
+    } catch (x) { toast(x.message, true); busy(e.target, false); if (x.first && !first) pLogin(true, c); }
   };
 }
+document.addEventListener('click', e => { const b = e.target.closest('[data-login]'); if (b) pLogin(b.dataset.login === '1', ($('#lCode') ? $('#lCode').value.trim().toUpperCase() : '')); });
+// change PIN (forced after a PIN from HR); the new session replaces the old one (other phones must sign in again)
+function pPin(forced) {
+  view(`${forced ? '' : back}<div class="card login"><h2>${forced ? 'ตั้ง PIN ใหม่ของคุณ' : 'เปลี่ยน PIN'}</h2>
+    ${forced ? '<div class="note warn">คุณเข้าด้วย PIN จากฝ่ายบุคคล กรุณาตั้ง PIN ใหม่ที่จำได้ก่อนใช้งาน</div>' : pinInput('pOld', 'PIN เดิม', 'current-password')}
+    ${pinInput('pNew', 'PIN ใหม่ (ตัวเลข 6 หลัก)', 'new-password')}${pinInput('pNew2', 'ยืนยัน PIN ใหม่', 'new-password')}
+    <button class="btn big primary" id="pGo">บันทึก PIN ใหม่</button>
+    <p class="hint">ห้ามใช้ PIN ที่เดาง่าย เช่น 123456, 111111, วันเกิด · มือถือเครื่องอื่นที่เข้าสู่ระบบไว้จะต้องเข้าใหม่</p></div>`);
+  $('#pGo').onclick = async e => {
+    const pin = digits($('#pNew').value);
+    if (pin.length !== 6) return toast('PIN ต้องเป็นตัวเลข 6 หลัก', true);
+    if (pin !== digits($('#pNew2').value)) return toast('PIN ใหม่ทั้งสองช่องไม่ตรงกัน', true);
+    busy(e.target, true, 'กำลังบันทึก…');
+    try { signIn(await call('web.pin', { pin, old: forced ? '' : digits($('#pOld').value) })); S.me.mustChange = false; toast('เปลี่ยน PIN แล้ว'); start(); }
+    catch (x) { toast(x.message, true); busy(e.target, false); }
+  };
+}
+function logout() { if (!confirm('ออกจากระบบบนเครื่องนี้?')) return; signOut(); pLogin(); }
+
+// ---------- add to the home screen (works like an app; Android shows the browser's own install, iPhone needs Share) ----------
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; const b = $('#inst'); if (b) b.hidden = false; });
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const inLine = () => /Line\//i.test(navigator.userAgent);
+function installCard() {
+  if (standalone()) return '';
+  if (inLine()) return `<div class="card tip">💡 เปิดในเบราว์เซอร์จะใช้งานสะดวกกว่า: กด ⋮ หรือ ⋯ มุมขวาบน › <b>เปิดในเบราว์เซอร์</b> แล้วเพิ่มลงหน้าจอโฮม</div>`;
+  if (isIos()) return `<div class="card tip">📲 <b>ใช้เหมือนแอป:</b> กดปุ่มแชร์ <b>⬆︎</b> ด้านล่าง › <b>เพิ่มไปยังหน้าจอโฮม</b></div>`;
+  return `<div class="card tip">📲 <b>ใช้เหมือนแอป:</b> ${'<button class="btn" id="inst" ' + (installEvt ? '' : 'hidden') + '>ติดตั้งบนหน้าจอ</button>'} หรือกดเมนู ⋮ › <b>เพิ่มลงในหน้าจอหลัก</b></div>`;
+}
+document.addEventListener('click', async e => {
+  if (e.target.id === 'inst' && installEvt) { installEvt.prompt(); await installEvt.userChoice.catch(() => null); installEvt = null; e.target.hidden = true; }
+  if (e.target.closest('[data-logout]')) logout();
+});
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => { }));
 
 // ---------- home ----------
 function nextType() { return (S.me.today || []).length % 2 === 0 ? 'IN' : 'OUT'; }
@@ -92,7 +148,8 @@ function pHome() {
       <button class="tile" data-go="mine"><i>📄</i>คำขอของฉัน</button>
       ${m.approver ? `<button class="tile ap" data-go="approve"><i>✅</i>รออนุมัติ${m.waiting ? `<em>${m.waiting}</em>` : ''}</button>` : ''}
     </div>
-    ${m.dev ? '<p class="hint center">โหมดทดสอบ (DEV) · ไม่ได้เปิดจาก LINE</p>' : ''}`);
+    ${installCard()}
+    <div class="foot-links">${m.web ? `<button class="mini" data-go="pin">🔑 เปลี่ยน PIN</button><button class="mini" data-logout>ออกจากระบบ</button>` : ''}</div>`);
 }
 
 // ---------- check in / out ----------
@@ -114,7 +171,7 @@ function pClock() {
     const inZ = site && d - Math.min(p.coords.accuracy, 100) <= +site.Radius;
     $('#gps').innerHTML = `<b class="${inZ ? 'ok' : 'bad'}">${site ? (inZ ? '✓ อยู่ในพื้นที่' : '✗ อยู่นอกพื้นที่') : 'ไม่มีสถานที่ที่กำหนด'}</b>${d != null ? ` · ห่าง ${d.toLocaleString()} ม.` : ''} <span class="muted">(ความแม่นยำ ±${Math.round(p.coords.accuracy)} ม.)</span>`;
     ready();
-  }, err => { $('#gps').innerHTML = `<span class="bad">หาตำแหน่งไม่ได้: ${esc(err.message)} · เปิด Location และอนุญาตให้ LINE ใช้ตำแหน่ง แล้วลองใหม่</span>`; }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  }, err => { $('#gps').innerHTML = `<span class="bad">หาตำแหน่งไม่ได้: ${esc(err.message)} · เปิด Location ในมือถือ และอนุญาตให้เบราว์เซอร์ (หรือ LINE) ใช้ตำแหน่ง แล้วลองใหม่</span>`; }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
   $('#cam').onchange = async e => { const f = e.target.files[0]; if (!f) return; st.photo = await shrink(f, 480); $('#pv').src = st.photo; $('#pv').hidden = false; $('#camLbl').classList.add('done'); ready(); };
   $('#go').onclick = async e => {
     busy(e.target, true, 'กำลังบันทึก…');
@@ -275,7 +332,7 @@ async function pMine() {
     $('#list').innerHTML = r.rows.length ? r.rows.map(x => `<div class="item"><div class="row"><span class="kind">${KIND[x.sheet]}</span><span class="st ${stCls(x.Status)}">${esc(x.Status)}</span></div>
       <div>${esc(summary(x))}</div>${x.Reason ? `<div class="muted">${esc(x.Reason)}</div>` : ''}${x.ApproveNote ? `<div class="muted">หมายเหตุผู้อนุมัติ: ${esc(x.ApproveNote)}</div>` : ''}
       <div class="row"><span class="muted">ส่งเมื่อ ${thDate(x.CreatedAt)} ${hhmm(x.CreatedAt)} น.</span>${x.Status === 'รออนุมัติ' && x.sheet !== 'DeviceBind' ? `<button class="mini" data-cancel="${esc(x.sheet)}|${esc(x.RequestID)}">ยกเลิก</button>` : ''}</div></div>`).join('') : '<p class="muted">ยังไม่มีรายการ</p>';
-  } catch (x) { $('#list').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
+  } catch (x) { if (!x.handled && $('#list')) $('#list').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
 }
 document.addEventListener('click', async e => {
   const c = e.target.closest('[data-cancel]'); if (!c) return;
@@ -295,7 +352,7 @@ async function pApprove() {
       ${x.PhotoUrl || x.AttachUrl ? `<div class="muted">มีรูปแนบ (ดูได้ในระบบฝ่ายบุคคล)</div>` : ''}
       <input class="why" placeholder="หมายเหตุ (จำเป็นถ้าไม่อนุมัติ)" maxlength="200">
       <div class="row"><button class="btn no" data-dec="no|${esc(x.sheet)}|${esc(x.RequestID)}">${x.sheet === 'TimeLog' ? 'ไม่รับรอง' : 'ไม่อนุมัติ'}</button><button class="btn primary" data-dec="yes|${esc(x.sheet)}|${esc(x.RequestID)}">${x.sheet === 'TimeLog' ? 'ยืนยัน' : 'อนุมัติ'}</button></div></div>`).join('') : '<p class="muted">ไม่มีรายการรออนุมัติ 🎉</p>';
-  } catch (x) { $('#list').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
+  } catch (x) { if (!x.handled && $('#list')) $('#list').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
 }
 document.addEventListener('click', async e => {
   const b = e.target.closest('[data-dec]'); if (!b) return;
