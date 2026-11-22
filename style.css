@@ -47,7 +47,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--acc); borde
 #toast.show { transform: translate(-50%, 0); opacity: 1; } #toast.err { background: var(--bad); }
 .seg { display: grid; grid-template-columns: 1fr 1fr; background: #eef1f8; border-radius: 12px; padding: 4px; margin-bottom: 4px; }
 .seg button { font: inherit; font-weight: 600; border: 0; background: none; padding: 9px; border-radius: 9px; color: var(--muted); } .seg button.on { background: #fff; color: var(--pri); box-shadow: 0 1px 3px rgba(16,24,40,.12); }
-.login input[type=password] { letter-spacing: 6px; font-size: 20px; text-align: center; }
+.login input.pinbox { letter-spacing: 6px; font-size: 20px; text-align: center; }
 .tip { font-size: 14px; background: #f6fbff; } .tip .btn { display: inline-block; width: auto; margin: 4px 6px 4px 0; padding: 6px 14px; }
 .foot-links { display: flex; justify-content: center; gap: 10px; margin-top: 4px; } .foot-links .mini { color: var(--pri); padding: 6px 14px; }.notice { display: block; width: 100%; text-align: left; font: inherit; border: 0; } .notice.ap { background: #e6f8f4; border-left: 4px solid var(--acc); } .notice.ap span { display: block; color: var(--muted); font-size: 14px; }
-.notice .nrow { padding: 7px 0; border-top: 1px dashed var(--line); font-size: 14.5px; } .notice .row + .nrow { margin-top: 6px; } .notice .mini { color: var(--pri); }
+.notice .nrow { padding: 7px 0; border-top: 1px dashed var(--line); font-size: 14.5px; } .notice .row + .nrow { margin-top: 6px; } .notice .mini { color: var(--pri); }.seg.sm { margin: 10px 0 0; } .seg.sm button { padding: 6px; font-size: 14px; }
+.chk { display: flex; gap: 8px; align-items: flex-start; color: var(--text); font-size: 14px; } .chk input { width: auto; margin-top: 3px; }
+.login .btn + .btn { margin-top: 8px; }

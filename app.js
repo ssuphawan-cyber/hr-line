@@ -27,7 +27,7 @@ async function call(action, data = {}) {
   catch { throw new Error('เชื่อมต่อไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่'); }
   const j = await r.json().catch(() => ({ ok: false, error: 'ระบบตอบกลับผิดรูปแบบ' }));
   if (!j.ok) {
-    const e = new Error(j.error || 'เกิดข้อผิดพลาด'); e.first = !!j.first;
+    const e = new Error(j.error || 'เกิดข้อผิดพลาด'); e.first = !!j.first; e.otp = !!j.otp;
     if (j.auth) { signOut(); toast(e.message, true); pLogin(); e.handled = true; }
     throw e;
   }
@@ -48,8 +48,8 @@ async function boot() {
   const q = new URLSearchParams(location.search);
   S.page = q.get('p') || 'home';
   if (!C.GAS_URL) return view(`<div class="card err-card"><h2>ยังไม่ได้ตั้งค่า</h2><p>ใส่ GAS_URL ในไฟล์ config.js</p></div>`);
-  if (!S.session) return pLogin();
-  try { await loadMe(); start(); }
+  if (!S.session) { await loadCfg(); return pLogin(); }
+  try { await loadMe(); start(); loadCfg(); }
   catch (e) { if (!e.handled) view(`<div class="card err-card"><h2>เปิดหน้าไม่สำเร็จ</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">ลองใหม่</button></div>`); }
 }
 async function loadMe() { S.me = await call('web.me'); $('#org').textContent = S.me.org || ''; badge(); }
@@ -90,54 +90,122 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 setInterval(() => { if (S.cur === 'home') refresh(); }, 120000);
 document.addEventListener('click', e => { const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go); });
 
-// ---------- sign in: employee code + PIN; first time: ID card's last 4 digits + a new PIN ----------
-const pinInput = (id, label, auto) => `<label>${label}<input id="${id}" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="${auto}" placeholder="••••••"></label>`;
+// ---------- sign in: the ways HR turned on (web.config) ----------
+//   login  employee code + PIN / password (also a temporary code from HR)
+//   first  first time: ID card's last 4 digits or passport number, then the person's own PIN / password
+//   otp    a 6-digit code sent to the person's email (also: forgot → set a new one)
 const digits = v => String(v || '').replace(/\D/g, '');
-function pLogin(first, typed) {
+const isPw = () => S.cfg && S.cfg.cred === 'password';
+const credTh = () => isPw() ? 'รหัสผ่าน' : ' PIN ';
+// a box for a secret: PIN = 6 digits on the number pad; password = any text. Signing in also takes HR's 6-digit code.
+function secretInput(id, label, auto, own) {
+  const pw = isPw();
+  return `<label>${label}<input id="${id}" type="password" ${pw ? 'maxlength="64" autocapitalize="off"' : 'inputmode="numeric" pattern="[0-9]*" maxlength="6" class="pinbox"'} autocomplete="${auto}" placeholder="${pw ? (own ? '8 ตัวขึ้นไป มีตัวอักษรและตัวเลข' : 'รหัสผ่าน หรือรหัสชั่วคราว 6 หลัก') : '••••••'}"></label>`;
+}
+// the same rule as the server, so a mistake shows before sending
+function ownSecretOk(s, code) {
+  if (!isPw()) { if (!/^\d{6}$/.test(s)) return 'PIN ต้องเป็นตัวเลข 6 หลัก'; if (/^(\d)\1{5}$/.test(s) || '0123456789'.includes(s) || '9876543210'.includes(s)) return 'PIN นี้เดาง่ายเกินไป'; return ''; }
+  if (s.length < 8) return 'รหัสผ่านต้องยาว 8 ตัวขึ้นไป';
+  if (!/[A-Za-z]/.test(s) || !/\d/.test(s)) return 'รหัสผ่านต้องมีทั้งตัวอักษรและตัวเลข';
+  if (code && s.toUpperCase().includes(code)) return 'รหัสผ่านต้องไม่มีรหัสพนักงานอยู่ในนั้น';
+  return '';
+}
+const secretVal = id => isPw() ? ($(id) ? $(id).value : '') : digits($(id) ? $(id).value : '');
+async function loadCfg() { if (!S.cfg) { try { S.cfg = await call('web.config'); } catch { S.cfg = { simple: true, otp: false, idCheck: ['id'], cred: 'pin' }; } } if (S.cfg.org) $('#org').textContent = S.cfg.org; return S.cfg; }
+function pLogin(mode, typed) {
+  const c = S.cfg || { simple: true, otp: false, idCheck: ['id'], cred: 'pin' };
+  if (!S.cfg) { loadCfg().then(() => pLogin(mode, typed)); return view('<div class="loading"><i></i>กำลังโหลด…</div>'); }
+  const tabs = [['login', 'เข้าสู่ระบบ'], c.simple ? ['first', 'ครั้งแรก'] : null, c.otp ? ['otp', 'รหัสทางอีเมล'] : null].filter(Boolean);
+  mode = tabs.some(t => t[0] === mode) ? mode : 'login';
   const code = typed || store.get(CKEY);
-  view(`<div class="card login"><h2>เข้าสู่ระบบพนักงาน</h2>
-    <div class="seg"><button class="${first ? '' : 'on'}" data-login="0">เข้าสู่ระบบ</button><button class="${first ? 'on' : ''}" data-login="1">เข้าใช้ครั้งแรก</button></div>
-    <label>รหัสพนักงาน<input id="lCode" autocapitalize="characters" autocomplete="username" value="${esc(code)}" placeholder="เช่น EMP0012"></label>
-    ${first ? `<label>เลขบัตรประชาชน 4 หลักท้าย<input id="lLast4" inputmode="numeric" maxlength="4" placeholder="xxxx"></label>
-      ${pinInput('lPin', 'ตั้ง PIN ใหม่ (ตัวเลข 6 หลัก)', 'new-password')}${pinInput('lPin2', 'ยืนยัน PIN อีกครั้ง', 'new-password')}
-      <button class="btn big primary" id="lGo">ตั้ง PIN และเข้าใช้</button>
-      <p class="hint">ใช้ได้เมื่อฝ่ายบุคคลมีเลขบัตรประชาชนของคุณ · ระบบไม่เก็บเลขบัตรบนอินเทอร์เน็ต ใช้ตรวจเทียบเท่านั้น · ถ้าไม่ผ่าน ขอ PIN จากฝ่ายบุคคล</p>`
-    : `${pinInput('lPin', 'PIN 6 หลัก', 'current-password')}
+  const docs = (c.idCheck || ['id']).filter(x => x === 'id' || x === 'passport');
+  const doc = S.doc && docs.includes(S.doc) ? S.doc : docs[0];
+  let body = '';
+  if (mode === 'login') body = `${secretInput('lPin', credTh(), 'current-password', false)}
       <button class="btn big primary" id="lGo">เข้าสู่ระบบ</button>
-      <p class="hint">ยังไม่มี PIN? เลือก “เข้าใช้ครั้งแรก” หรือขอใบแจ้ง PIN จากฝ่ายบุคคล · ลืม PIN ติดต่อฝ่ายบุคคล · กรอกผิด 5 ครั้งต้องรอ 15 นาที</p>`}</div>
-    ${installCard()}`);
-  $('#lCode').oninput = e => { e.target.value = e.target.value.toUpperCase(); };
-  (code ? (first ? $('#lLast4') : $('#lPin')) : $('#lCode')).focus();
-  const enter = e => { if (e.key === 'Enter') $('#lGo').click(); };
-  document.querySelectorAll('.login input').forEach(i => i.onkeydown = enter);
+      <p class="hint">${c.simple ? 'ยังไม่เคยเข้าใช้? เลือก “ครั้งแรก”' : ''}${c.otp ? `${c.simple ? ' · ' : ''}ลืม${credTh()}? เลือก “รหัสทางอีเมล”` : ' · ลืมรหัส ติดต่อฝ่ายบุคคล'} · กรอกผิด 5 ครั้งต้องรอ 15 นาที</p>`;
+  else if (mode === 'first') body = `
+      ${docs.length > 1 ? `<div class="seg sm">${docs.map(d => `<button class="${d === doc ? 'on' : ''}" data-doc="${d}">${d === 'id' ? 'บัตรประชาชน' : 'หนังสือเดินทาง'}</button>`).join('')}</div>` : ''}
+      ${doc === 'id' ? '<label>เลขบัตรประชาชน 4 หลักท้าย<input id="lDoc" inputmode="numeric" maxlength="4" placeholder="xxxx"></label>'
+        : '<label>เลขหนังสือเดินทาง (Passport No.)<input id="lDoc" autocapitalize="characters" maxlength="20" placeholder="เช่น AA1234567"></label>'}
+      ${secretInput('lPin', 'ตั้ง' + credTh() + 'ของคุณ', 'new-password', true)}${secretInput('lPin2', 'ยืนยัน' + credTh() + 'อีกครั้ง', 'new-password', true)}
+      <button class="btn big primary" id="lGo">ตั้ง${credTh()}และเข้าใช้</button>
+      <p class="hint">ระบบตรวจเทียบกับข้อมูลที่ฝ่ายบุคคลบันทึกไว้ ไม่เก็บเลข${doc === 'id' ? 'บัตร' : 'หนังสือเดินทาง'}ของคุณบนอินเทอร์เน็ต · ถ้าไม่ผ่าน ${c.otp ? 'ลอง “รหัสทางอีเมล” หรือ' : ''}ติดต่อฝ่ายบุคคล</p>`;
+  else body = S.otpTo ? `<div class="note">ส่งรหัส 6 หลักไปที่ <b>${esc(S.otpTo)}</b> แล้ว (ใช้ได้ 10 นาที · ดูในกล่องจดหมายขยะด้วย)</div>
+      <label>รหัสจากอีเมล<input id="lOtp" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" class="pinbox" placeholder="••••••"></label>
+      ${c.simple ? `<label class="chk"><input type="checkbox" id="lReset" ${S.otpReset ? 'checked' : ''}> ตั้ง${credTh()}ใหม่ด้วย (ลืม${credTh()} / ใช้ครั้งต่อไปโดยไม่ต้องรอรหัส)</label>
+        <div id="lResetBox" ${S.otpReset ? '' : 'hidden'}>${secretInput('lPin', credTh() + 'ใหม่', 'new-password', true)}${secretInput('lPin2', 'ยืนยัน' + credTh() + 'ใหม่', 'new-password', true)}</div>` : ''}
+      <button class="btn big primary" id="lGo">ยืนยันรหัส</button>
+      <button class="btn" id="lAgain">ขอรหัสใหม่</button>`
+    : `<button class="btn big primary" id="lGo">ส่งรหัสไปที่อีเมลของฉัน</button>
+      <p class="hint">ระบบส่งรหัสไปที่อีเมลที่ฝ่ายบุคคลบันทึกไว้ในทะเบียนพนักงาน · ถ้ายังไม่มีอีเมลในระบบ ติดต่อฝ่ายบุคคล</p>`;
+  view(`<div class="card login"><h2>เข้าสู่ระบบพนักงาน</h2>
+    ${tabs.length > 1 ? `<div class="seg" style="grid-template-columns:repeat(${tabs.length},1fr)">${tabs.map(([k, l]) => `<button class="${k === mode ? 'on' : ''}" data-login="${k}">${l}</button>`).join('')}</div>` : ''}
+    <label>รหัสพนักงาน<input id="lCode" autocapitalize="characters" autocomplete="username" value="${esc(code)}" placeholder="เช่น EMP0012" ${mode === 'otp' && S.otpTo ? 'readonly' : ''}></label>
+    ${body}</div>${installCard()}`);
+  S.mode = mode;
+  $('#lCode').oninput = e => { e.target.value = e.target.value.toUpperCase(); S.otpTo = ''; };
+  const first = mode === 'otp' && S.otpTo ? $('#lOtp') : code ? ($('#lDoc') || $('#lPin') || $('#lGo')) : $('#lCode');
+  if (first && first.focus) first.focus();
+  document.querySelectorAll('.login input').forEach(i => i.onkeydown = e => { if (e.key === 'Enter') $('#lGo').click(); });
+  if ($('#lReset')) $('#lReset').onchange = e => { S.otpReset = e.target.checked; $('#lResetBox').hidden = !e.target.checked; };
+  if ($('#lAgain')) $('#lAgain').onclick = () => { S.otpTo = ''; pLogin('otp', $('#lCode').value.trim().toUpperCase()); };
   $('#lGo').onclick = async e => {
-    const c = $('#lCode').value.trim().toUpperCase(), pin = digits($('#lPin').value);
-    if (!c) return toast('กรอกรหัสพนักงาน', true);
-    if (pin.length !== 6) return toast('PIN ต้องเป็นตัวเลข 6 หลัก', true);
-    if (first && digits($('#lLast4').value).length !== 4) return toast('กรอกเลขบัตรประชาชน 4 หลักท้าย', true);
-    if (first && pin !== digits($('#lPin2').value)) return toast('PIN ทั้งสองช่องไม่ตรงกัน', true);
-    busy(e.target, true, 'กำลังตรวจสอบ…');
+    const cc = $('#lCode').value.trim().toUpperCase();
+    if (!cc) return toast('กรอกรหัสพนักงาน', true);
+    let req, wait = 'กำลังตรวจสอบ…';
+    if (mode === 'login') {
+      const s = secretVal('#lPin');
+      if (!s) return toast('กรอก' + credTh(), true);
+      req = ['web.login', { code: cc, pin: s }];
+    } else if (mode === 'first') {
+      const d = doc === 'id' ? digits($('#lDoc').value) : $('#lDoc').value.trim(), s = secretVal('#lPin');
+      if (doc === 'id' ? d.length !== 4 : d.replace(/[^A-Za-z0-9]/g, '').length < 6) return toast(doc === 'id' ? 'กรอกเลขบัตรประชาชน 4 หลักท้าย' : 'กรอกเลขหนังสือเดินทาง', true);
+      const bad = ownSecretOk(s, cc); if (bad) return toast(bad, true);
+      if (s !== secretVal('#lPin2')) return toast(credTh() + 'ทั้งสองช่องไม่ตรงกัน', true);
+      req = ['web.first', { code: cc, idType: doc, idValue: d, pin: s }];
+    } else if (!S.otpTo) {
+      busy(e.target, true, 'กำลังส่งรหัส…');
+      try { const r = await call('web.otp', { code: cc }); store.set(CKEY, cc); S.otpTo = r.to; toast('ส่งรหัสแล้ว'); pLogin('otp', cc); }
+      catch (x) { toast(x.message, true); busy(e.target, false); }
+      return;
+    } else {
+      const o = digits($('#lOtp').value), reset = $('#lReset') && $('#lReset').checked, s = reset ? secretVal('#lPin') : '';
+      if (o.length !== 6) return toast('กรอกรหัส 6 หลักจากอีเมล', true);
+      if (reset) { const bad = ownSecretOk(s, cc); if (bad) return toast(bad, true); if (s !== secretVal('#lPin2')) return toast(credTh() + 'ทั้งสองช่องไม่ตรงกัน', true); }
+      req = ['web.otpverify', { code: cc, otp: o, pin: s }];
+    }
+    busy(e.target, true, wait);
     try {
-      const r = first ? await call('web.first', { code: c, last4: digits($('#lLast4').value), pin }) : await call('web.login', { code: c, pin });
-      store.set(CKEY, c); signIn(r);
-      await loadMe(); toast(first ? 'ตั้ง PIN เรียบร้อย' : 'เข้าสู่ระบบแล้ว'); start();
-    } catch (x) { toast(x.message, true); busy(e.target, false); if (x.first && !first) pLogin(true, c); }
+      const r = await call(req[0], req[1]);
+      store.set(CKEY, cc); signIn(r); S.otpTo = ''; S.otpReset = false;
+      await loadMe(); toast(mode === 'first' ? 'ตั้ง' + credTh() + 'เรียบร้อย' : 'เข้าสู่ระบบแล้ว'); start();
+    } catch (x) {
+      toast(x.message, true); busy(e.target, false);
+      if (mode === 'login' && (x.first || x.otp)) pLogin(x.first ? 'first' : 'otp', cc);
+    }
   };
 }
-document.addEventListener('click', e => { const b = e.target.closest('[data-login]'); if (b) pLogin(b.dataset.login === '1', ($('#lCode') ? $('#lCode').value.trim().toUpperCase() : '')); });
-// change PIN (forced after a PIN from HR); the new session replaces the old one (other phones must sign in again)
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-login]'); if (b) { S.otpTo = ''; pLogin(b.dataset.login, ($('#lCode') ? $('#lCode').value.trim().toUpperCase() : '')); }
+  const d = e.target.closest('[data-doc]'); if (d) { S.doc = d.dataset.doc; pLogin('first', ($('#lCode') ? $('#lCode').value.trim().toUpperCase() : '')); }
+});
+// set / change the secret (forced after a temporary code from HR); the new session replaces the old one
 function pPin(forced) {
-  view(`${forced ? '' : back}<div class="card login"><h2>${forced ? 'ตั้ง PIN ใหม่ของคุณ' : 'เปลี่ยน PIN'}</h2>
-    ${forced ? '<div class="note warn">คุณเข้าด้วย PIN จากฝ่ายบุคคล กรุณาตั้ง PIN ใหม่ที่จำได้ก่อนใช้งาน</div>' : pinInput('pOld', 'PIN เดิม', 'current-password')}
-    ${pinInput('pNew', 'PIN ใหม่ (ตัวเลข 6 หลัก)', 'new-password')}${pinInput('pNew2', 'ยืนยัน PIN ใหม่', 'new-password')}
-    <button class="btn big primary" id="pGo">บันทึก PIN ใหม่</button>
-    <p class="hint">ห้ามใช้ PIN ที่เดาง่าย เช่น 123456, 111111, วันเกิด · มือถือเครื่องอื่นที่เข้าสู่ระบบไว้จะต้องเข้าใหม่</p></div>`);
+  if (!S.cfg) { loadCfg().then(() => pPin(forced)); return; }
+  const needOld = !forced && S.me && S.me.hasSecret;
+  view(`${forced ? '' : back}<div class="card login"><h2>${forced ? 'ตั้ง' + credTh() + 'ของคุณ' : needOld ? 'เปลี่ยน' + credTh() : 'ตั้ง' + credTh()}</h2>
+    ${forced ? `<div class="note warn">คุณเข้าด้วยรหัสชั่วคราวจากฝ่ายบุคคล กรุณาตั้ง${credTh()}ที่จำได้ก่อนใช้งาน</div>` : ''}
+    ${needOld ? secretInput('pOld', credTh() + 'เดิม', 'current-password', false) : ''}
+    ${secretInput('pNew', credTh() + 'ใหม่', 'new-password', true)}${secretInput('pNew2', 'ยืนยัน' + credTh() + 'ใหม่', 'new-password', true)}
+    <button class="btn big primary" id="pGo">บันทึก</button>
+    <p class="hint">${isPw() ? '8 ตัวขึ้นไป มีทั้งตัวอักษรและตัวเลข ไม่ใช้รหัสพนักงาน' : 'ตัวเลข 6 หลัก ห้ามใช้ 123456, 111111 หรือวันเกิด'} · มือถือเครื่องอื่นที่เข้าสู่ระบบไว้จะต้องเข้าใหม่</p></div>`);
   $('#pGo').onclick = async e => {
-    const pin = digits($('#pNew').value);
-    if (pin.length !== 6) return toast('PIN ต้องเป็นตัวเลข 6 หลัก', true);
-    if (pin !== digits($('#pNew2').value)) return toast('PIN ใหม่ทั้งสองช่องไม่ตรงกัน', true);
+    const s = secretVal('#pNew'), bad = ownSecretOk(s, S.me.emp.Code);
+    if (bad) return toast(bad, true);
+    if (s !== secretVal('#pNew2')) return toast(credTh() + 'ใหม่ทั้งสองช่องไม่ตรงกัน', true);
     busy(e.target, true, 'กำลังบันทึก…');
-    try { signIn(await call('web.pin', { pin, old: forced ? '' : digits($('#pOld').value) })); S.me.mustChange = false; toast('เปลี่ยน PIN แล้ว'); start(); }
+    try { signIn(await call('web.pin', { pin: s, old: needOld ? secretVal('#pOld') : '' })); S.me.mustChange = false; S.me.hasSecret = true; toast('บันทึก' + credTh() + 'แล้ว'); start(); }
     catch (x) { toast(x.message, true); busy(e.target, false); }
   };
 }
@@ -180,7 +248,7 @@ function pHome() {
       ${m.approver ? `<button class="tile ap" data-go="approve"><i>✅</i>รออนุมัติ${m.waiting ? `<em>${m.waiting}</em>` : ''}</button>` : ''}
     </div>
     ${installCard()}
-    <div class="foot-links"><button class="mini" data-go="pin">🔑 เปลี่ยน PIN</button><button class="mini" data-logout>ออกจากระบบ</button></div>`);
+    <div class="foot-links"><button class="mini" data-go="pin">🔑 ${S.me.hasSecret ? 'เปลี่ยน' : 'ตั้ง'}${credTh()}</button><button class="mini" data-logout>ออกจากระบบ</button></div>`);
 }
 
 // ---------- check in / out ----------
