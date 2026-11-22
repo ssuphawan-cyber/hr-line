@@ -23,12 +23,14 @@ const KIND = { TimeLog: 'ลงเวลา', LeaveReq: 'ขอลา', OTReq: '
 // ---------- server ----------
 async function call(action, data = {}) {
   let r;
-  try { r = await fetch(C.GAS_URL, { method: 'POST', body: JSON.stringify(Object.assign({ action, session: S.session }, data)) }); }
+  const sess = S.session;   // an answer that comes back after the person signed out / in again is not acted on
+  try { r = await fetch(C.GAS_URL, { method: 'POST', body: JSON.stringify(Object.assign({ action, session: sess }, data)) }); }
   catch { throw new Error('เชื่อมต่อไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่'); }
   const j = await r.json().catch(() => ({ ok: false, error: 'ระบบตอบกลับผิดรูปแบบ' }));
+  if (sess && sess !== S.session) { const e = new Error('stale'); e.handled = true; throw e; }
   if (!j.ok) {
     const e = new Error(j.error || 'เกิดข้อผิดพลาด'); e.first = !!j.first; e.otp = !!j.otp;
-    if (j.auth) { signOut(); toast(e.message, true); pLogin(); e.handled = true; }
+    if (j.auth && sess) { signOut(); toast(e.message, true); pLogin(); e.handled = true; }
     throw e;
   }
   return j;
@@ -36,6 +38,7 @@ async function call(action, data = {}) {
 function signIn(r) { S.session = r.session; store.set(SKEY, r.session); }
 function signOut() { S.session = ''; S.me = null; store.set(SKEY, ''); }
 function toast(msg, err) {
+  if (msg === 'stale') return;   // a late answer to a screen that is gone (see call)
   const t = $('#toast'); t.textContent = (err ? '⚠ ' : '✓ ') + msg; t.className = 'show' + (err ? ' err' : '');
   clearTimeout(t._h); t._h = setTimeout(() => t.className = '', err ? 6000 : 3500);
 }
