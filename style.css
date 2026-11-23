@@ -53,3 +53,5 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--acc); borde
 .notice .nrow { padding: 7px 0; border-top: 1px dashed var(--line); font-size: 14.5px; } .notice .row + .nrow { margin-top: 6px; } .notice .mini { color: var(--pri); }.seg.sm { margin: 10px 0 0; } .seg.sm button { padding: 6px; font-size: 14px; }
 .chk { display: flex; gap: 8px; align-items: flex-start; color: var(--text); font-size: 14px; } .chk input { width: auto; margin-top: 3px; }
 .login .btn + .btn { margin-top: 8px; }
+.mini.blue { color: var(--pri); } .card.user { padding: 12px 14px; } .card.user .row + .muted { margin-top: 2px; } .card.user .mini { margin: 0 6px 4px 0; }
+#admQ { margin-top: 10px; }

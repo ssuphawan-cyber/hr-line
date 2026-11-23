@@ -55,13 +55,14 @@ async function boot() {
   if (dv) { S.session = dv[1]; history.replaceState(null, '', location.pathname + location.search); }
   if (!C.GAS_URL) return view(`<div class="card err-card"><h2>ยังไม่ได้ตั้งค่า</h2><p>ใส่ GAS_URL ในไฟล์ config.js</p></div>`);
   if (!S.session) { await loadCfg(); return pLogin(); }
-  try { await loadMe(); start(); loadCfg(); }
+  try { await loadCfg(); await afterSignIn(null, true); }
   catch (e) { if (!e.handled) view(`<div class="card err-card"><h2>เปิดหน้าไม่สำเร็จ</h2><p>${esc(e.message)}</p><button class="btn" onclick="location.reload()">ลองใหม่</button></div>`); }
 }
 async function loadMe() { S.me = await call('web.me'); $('#org').textContent = S.me.org || ''; badge(); }
 // after signing in: HR's PIN is changed first, then the page asked for (a link may ask for approvals: ?p=approve)
 function start() { if (S.me.mustChange) return pPin(true); const p = S.page; S.page = 'home'; go(p); }
 function go(p) {
+  if (S.admin && !S.me) return p === 'pin' ? pPin(false) : pAdmin();
   if (!S.me) return pLogin();
   S.cur = p;
   ({ home: pHome, clock: pClock, leave: pLeave, ot: pOt, fix: pFix, mine: pMine, approve: pApprove, pin: () => pPin(false) }[p] || pHome)();
@@ -96,126 +97,200 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 setInterval(() => { if (S.cur === 'home') refresh(); }, 120000);
 document.addEventListener('click', e => { const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go); });
 
-// ---------- sign in: the ways HR turned on (web.config) ----------
-//   login  employee code + PIN / password (also a temporary code from HR)
-//   first  first time: ID card's last 4 digits or passport number, then the person's own PIN / password
-//   otp    a 6-digit code sent to the person's email (also: forgot → set a new one)
+// ---------- sign in ----------
+//   login  username (employee code / company email / ID card / passport, as the admin made it) + PIN or password
+//   first  first time or forgotten secret: a 6-digit code by email or SMS, then the person's own PIN / password
+//   The top admin signs in with username + password only (no code), and gets the admin console.
 const digits = v => String(v || '').replace(/\D/g, '');
 const isPw = () => S.cfg && S.cfg.cred === 'password';
 const credTh = () => isPw() ? 'รหัสผ่าน' : ' PIN ';
-// a box for a secret: PIN = 6 digits on the number pad; password = any text. Signing in also takes HR's 6-digit code.
-function secretInput(id, label, auto, own) {
-  const pw = isPw();
-  return `<label>${label}<input id="${id}" type="password" ${pw ? 'maxlength="64" autocapitalize="off"' : 'inputmode="numeric" pattern="[0-9]*" maxlength="6" class="pinbox"'} autocomplete="${auto}" placeholder="${pw ? (own ? '8 ตัวขึ้นไป มีตัวอักษรและตัวเลข' : 'รหัสผ่าน หรือรหัสชั่วคราว 6 หลัก') : '••••••'}"></label>`;
+// a box for a secret: PIN = 6 digits on the number pad; password (and the admin's) = any text
+function secretInput(id, label, auto, own, pw) {
+  pw = pw || isPw();
+  return `<label>${label}<input id="${id}" type="password" ${pw ? 'maxlength="64" autocapitalize="off"' : 'inputmode="numeric" pattern="[0-9]*" maxlength="6" class="pinbox"'} autocomplete="${auto}" placeholder="${pw ? (own ? '8 ตัวขึ้นไป มีตัวอักษรและตัวเลข' : 'รหัสผ่าน') : '••••••'}"></label>`;
 }
 // the same rule as the server, so a mistake shows before sending
-function ownSecretOk(s, code) {
-  if (!isPw()) { if (!/^\d{6}$/.test(s)) return 'PIN ต้องเป็นตัวเลข 6 หลัก'; if (/^(\d)\1{5}$/.test(s) || '0123456789'.includes(s) || '9876543210'.includes(s)) return 'PIN นี้เดาง่ายเกินไป'; return ''; }
-  if (s.length < 8) return 'รหัสผ่านต้องยาว 8 ตัวขึ้นไป';
+function ownSecretOk(s, code, admin) {
+  if (!admin && !isPw()) { if (!/^\d{6}$/.test(s)) return 'PIN ต้องเป็นตัวเลข 6 หลัก'; if (/^(\d)\1{5}$/.test(s) || '0123456789'.includes(s) || '9876543210'.includes(s)) return 'PIN นี้เดาง่ายเกินไป'; return ''; }
+  if (s.length < (admin ? 10 : 8)) return `รหัสผ่านต้องยาว ${admin ? 10 : 8} ตัวขึ้นไป`;
   if (!/[A-Za-z]/.test(s) || !/\d/.test(s)) return 'รหัสผ่านต้องมีทั้งตัวอักษรและตัวเลข';
   if (code && s.toUpperCase().includes(code)) return 'รหัสผ่านต้องไม่มีรหัสพนักงานอยู่ในนั้น';
   return '';
 }
-const secretVal = id => isPw() ? ($(id) ? $(id).value : '') : digits($(id) ? $(id).value : '');
-async function loadCfg() { if (!S.cfg) { try { S.cfg = await call('web.config'); } catch { S.cfg = { simple: true, otp: false, idCheck: ['id'], cred: 'pin' }; } } if (S.cfg.org) $('#org').textContent = S.cfg.org; return S.cfg; }
+const secretVal = (id, pw) => (pw || isPw()) ? ($(id) ? $(id).value : '') : digits($(id) ? $(id).value : '');
+async function loadCfg() { if (!S.cfg) { try { S.cfg = await call('web.config'); } catch { S.cfg = { cred: 'pin', email: true, sms: false }; } } if (S.cfg.org) $('#org').textContent = S.cfg.org; return S.cfg; }
+const userVal = () => ($('#lUser') ? $('#lUser').value.trim() : '');
 function pLogin(mode, typed) {
-  const c = S.cfg || { simple: true, otp: false, idCheck: ['id'], cred: 'pin' };
   if (!S.cfg) { loadCfg().then(() => pLogin(mode, typed)); return view('<div class="loading"><i></i>กำลังโหลด…</div>'); }
-  const tabs = [['login', 'เข้าสู่ระบบ'], c.simple ? ['first', 'ครั้งแรก'] : null, c.otp ? ['otp', 'รหัสทางอีเมล'] : null].filter(Boolean);
-  mode = tabs.some(t => t[0] === mode) ? mode : 'login';
-  const code = typed || store.get(CKEY);
-  const docs = (c.idCheck || ['id']).filter(x => x === 'id' || x === 'passport');
-  const doc = S.doc && docs.includes(S.doc) ? S.doc : docs[0];
+  mode = mode === 'first' ? 'first' : 'login';
+  const user = typed != null ? typed : store.get(CKEY), adm = !!S.adminLogin;
+  const O = S.otp || {};   // { user, channels, sentTo }
   let body = '';
-  if (mode === 'login') body = `${secretInput('lPin', credTh(), 'current-password', false)}
+  if (mode === 'login') body = `${secretInput('lPin', adm ? 'รหัสผ่าน' : credTh(), 'current-password', false, adm)}
       <button class="btn big primary" id="lGo">เข้าสู่ระบบ</button>
-      <p class="hint">${c.simple ? 'ยังไม่เคยเข้าใช้? เลือก “ครั้งแรก”' : ''}${c.otp ? `${c.simple ? ' · ' : ''}ลืม${credTh()}? เลือก “รหัสทางอีเมล”` : ' · ลืมรหัส ติดต่อฝ่ายบุคคล'} · กรอกผิด 5 ครั้งต้องรอ 15 นาที</p>`;
-  else if (mode === 'first') body = `
-      ${docs.length > 1 ? `<div class="seg sm">${docs.map(d => `<button class="${d === doc ? 'on' : ''}" data-doc="${d}">${d === 'id' ? 'บัตรประชาชน' : 'หนังสือเดินทาง'}</button>`).join('')}</div>` : ''}
-      ${doc === 'id' ? '<label>เลขบัตรประชาชน 4 หลักท้าย<input id="lDoc" inputmode="numeric" maxlength="4" placeholder="xxxx"></label>'
-        : '<label>เลขหนังสือเดินทาง (Passport No.)<input id="lDoc" autocapitalize="characters" maxlength="20" placeholder="เช่น AA1234567"></label>'}
+      <p class="hint">${adm ? 'บัญชีผู้ดูแลระบบสูงสุด · ' : 'ใช้ครั้งแรกหรือลืมรหัส เลือก “ครั้งแรก / ลืมรหัส” · '}กรอกผิด 5 ครั้งต้องรอ 15 นาที
+        · <a href="#" data-admlogin>${adm ? 'เข้าสู่ระบบพนักงาน' : 'ผู้ดูแลระบบ'}</a></p>`;
+  else if (!O.channels || O.user !== user) body = `<button class="btn big primary" id="lGo">ถัดไป</button>
+      <p class="hint">ระบบจะส่งรหัสยืนยัน 6 หลักไปที่อีเมลหรือเบอร์มือถือที่ผู้ดูแลระบบบันทึกไว้ แล้วให้คุณตั้ง${credTh()}เอง · ถ้ายังไม่มีบัญชี ติดต่อผู้ดูแลระบบ</p>`;
+  else if (!O.sentTo) body = `<div class="muted" style="margin-top:10px">ส่งรหัสยืนยันไปที่</div>
+      ${O.channels.map(c => `<button class="btn" data-otpch="${c.ch}">${c.ch === 'email' ? '📧 อีเมล' : '📱 SMS'} ${esc(c.to)}</button>`).join('')}
+      <button class="btn" data-otpback style="border:0">‹ เปลี่ยนชื่อผู้ใช้</button>`;
+  else body = `<div class="note">ส่งรหัส 6 หลักไปที่ <b>${esc(O.sentTo)}</b> แล้ว (ใช้ได้ 10 นาที${O.ch === 'email' ? ' · ดูในกล่องจดหมายขยะด้วย' : ''})</div>
+      <label>รหัสยืนยัน<input id="lOtp" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" class="pinbox" placeholder="••••••"></label>
       ${secretInput('lPin', 'ตั้ง' + credTh() + 'ของคุณ', 'new-password', true)}${secretInput('lPin2', 'ยืนยัน' + credTh() + 'อีกครั้ง', 'new-password', true)}
-      <button class="btn big primary" id="lGo">ตั้ง${credTh()}และเข้าใช้</button>
-      <p class="hint">ระบบตรวจเทียบกับข้อมูลที่ฝ่ายบุคคลบันทึกไว้ ไม่เก็บเลข${doc === 'id' ? 'บัตร' : 'หนังสือเดินทาง'}ของคุณบนอินเทอร์เน็ต · ถ้าไม่ผ่าน ${c.otp ? 'ลอง “รหัสทางอีเมล” หรือ' : ''}ติดต่อฝ่ายบุคคล</p>`;
-  else body = S.otpTo ? `<div class="note">ส่งรหัส 6 หลักไปที่ <b>${esc(S.otpTo)}</b> แล้ว (ใช้ได้ 10 นาที · ดูในกล่องจดหมายขยะด้วย)</div>
-      <label>รหัสจากอีเมล<input id="lOtp" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" class="pinbox" placeholder="••••••"></label>
-      ${c.simple ? `<label class="chk"><input type="checkbox" id="lReset" ${S.otpReset ? 'checked' : ''}> ตั้ง${credTh()}ใหม่ด้วย (ลืม${credTh()} / ใช้ครั้งต่อไปโดยไม่ต้องรอรหัส)</label>
-        <div id="lResetBox" ${S.otpReset ? '' : 'hidden'}>${secretInput('lPin', credTh() + 'ใหม่', 'new-password', true)}${secretInput('lPin2', 'ยืนยัน' + credTh() + 'ใหม่', 'new-password', true)}</div>` : ''}
-      <button class="btn big primary" id="lGo">ยืนยันรหัส</button>
-      <button class="btn" id="lAgain">ขอรหัสใหม่</button>`
-    : `<button class="btn big primary" id="lGo">ส่งรหัสไปที่อีเมลของฉัน</button>
-      <p class="hint">ระบบส่งรหัสไปที่อีเมลที่ฝ่ายบุคคลบันทึกไว้ในทะเบียนพนักงาน · ถ้ายังไม่มีอีเมลในระบบ ติดต่อฝ่ายบุคคล</p>`;
-  view(`<div class="card login"><h2>เข้าสู่ระบบพนักงาน</h2>
-    ${tabs.length > 1 ? `<div class="seg" style="grid-template-columns:repeat(${tabs.length},1fr)">${tabs.map(([k, l]) => `<button class="${k === mode ? 'on' : ''}" data-login="${k}">${l}</button>`).join('')}</div>` : ''}
-    <label>รหัสพนักงาน<input id="lCode" autocapitalize="characters" autocomplete="username" value="${esc(code)}" placeholder="เช่น EMP0012" ${mode === 'otp' && S.otpTo ? 'readonly' : ''}></label>
-    ${body}</div>${installCard()}`);
+      <button class="btn big primary" id="lGo">ยืนยันและเข้าใช้</button>
+      <button class="btn" data-otpagain>ขอรหัสใหม่</button>`;
+  view(`<div class="card login"><h2>${adm ? 'เข้าสู่ระบบผู้ดูแล' : 'เข้าสู่ระบบพนักงาน'}</h2>
+    ${adm ? '' : `<div class="seg"><button class="${mode === 'login' ? 'on' : ''}" data-login="login">เข้าสู่ระบบ</button><button class="${mode === 'first' ? 'on' : ''}" data-login="first">ครั้งแรก / ลืมรหัส</button></div>`}
+    <label>ชื่อผู้ใช้<input id="lUser" autocapitalize="off" autocomplete="username" value="${esc(user)}" placeholder="${adm ? 'ชื่อผู้ใช้ผู้ดูแล' : 'รหัสพนักงาน / อีเมล / เลขบัตร ตามที่ได้รับแจ้ง'}" ${mode === 'first' && O.channels && O.user === user ? 'readonly' : ''}></label>
+    ${body}</div>${adm ? '' : installCard()}`);
   S.mode = mode;
-  $('#lCode').oninput = e => { e.target.value = e.target.value.toUpperCase(); S.otpTo = ''; };
-  const first = mode === 'otp' && S.otpTo ? $('#lOtp') : code ? ($('#lDoc') || $('#lPin') || $('#lGo')) : $('#lCode');
-  if (first && first.focus) first.focus();
-  document.querySelectorAll('.login input').forEach(i => i.onkeydown = e => { if (e.key === 'Enter') $('#lGo').click(); });
-  if ($('#lReset')) $('#lReset').onchange = e => { S.otpReset = e.target.checked; $('#lResetBox').hidden = !e.target.checked; };
-  if ($('#lAgain')) $('#lAgain').onclick = () => { S.otpTo = ''; pLogin('otp', $('#lCode').value.trim().toUpperCase()); };
-  $('#lGo').onclick = async e => {
-    const cc = $('#lCode').value.trim().toUpperCase();
-    if (!cc) return toast('กรอกรหัสพนักงาน', true);
-    let req, wait = 'กำลังตรวจสอบ…';
-    if (mode === 'login') {
-      const s = secretVal('#lPin');
-      if (!s) return toast('กรอก' + credTh(), true);
-      req = ['web.login', { code: cc, pin: s }];
-    } else if (mode === 'first') {
-      const d = doc === 'id' ? digits($('#lDoc').value) : $('#lDoc').value.trim(), s = secretVal('#lPin');
-      if (doc === 'id' ? d.length !== 4 : d.replace(/[^A-Za-z0-9]/g, '').length < 6) return toast(doc === 'id' ? 'กรอกเลขบัตรประชาชน 4 หลักท้าย' : 'กรอกเลขหนังสือเดินทาง', true);
-      const bad = ownSecretOk(s, cc); if (bad) return toast(bad, true);
-      if (s !== secretVal('#lPin2')) return toast(credTh() + 'ทั้งสองช่องไม่ตรงกัน', true);
-      req = ['web.first', { code: cc, idType: doc, idValue: d, pin: s }];
-    } else if (!S.otpTo) {
-      busy(e.target, true, 'กำลังส่งรหัส…');
-      try { const r = await call('web.otp', { code: cc }); store.set(CKEY, cc); S.otpTo = r.to; toast('ส่งรหัสแล้ว'); pLogin('otp', cc); }
-      catch (x) { toast(x.message, true); busy(e.target, false); }
-      return;
-    } else {
-      const o = digits($('#lOtp').value), reset = $('#lReset') && $('#lReset').checked, s = reset ? secretVal('#lPin') : '';
-      if (o.length !== 6) return toast('กรอกรหัส 6 หลักจากอีเมล', true);
-      if (reset) { const bad = ownSecretOk(s, cc); if (bad) return toast(bad, true); if (s !== secretVal('#lPin2')) return toast(credTh() + 'ทั้งสองช่องไม่ตรงกัน', true); }
-      req = ['web.otpverify', { code: cc, otp: o, pin: s }];
-    }
-    busy(e.target, true, wait);
+  $('#lUser').oninput = () => { S.otp = null; };
+  const f = mode === 'first' && O.sentTo ? $('#lOtp') : user ? ($('#lPin') || $('#lGo')) : $('#lUser');
+  if (f && f.focus) f.focus();
+  document.querySelectorAll('.login input').forEach(i => i.onkeydown = e => { if (e.key === 'Enter' && $('#lGo')) $('#lGo').click(); });
+  if ($('#lGo')) $('#lGo').onclick = async e => {
+    const u = userVal();
+    if (!u) return toast('กรอกชื่อผู้ใช้', true);
+    busy(e.target, true, 'กำลังตรวจสอบ…');
     try {
-      const r = await call(req[0], req[1]);
-      store.set(CKEY, cc); signIn(r); S.otpTo = ''; S.otpReset = false;
-      await loadMe(); toast(mode === 'first' ? 'ตั้ง' + credTh() + 'เรียบร้อย' : 'เข้าสู่ระบบแล้ว'); start();
+      if (mode === 'login') {
+        const s = secretVal('#lPin', adm); if (!s) { busy(e.target, false); return toast('กรอกรหัส', true); }
+        const r = await call('web.login', { user: u, pin: s });
+        store.set(CKEY, u); signIn(r); S.adminLogin = false; await afterSignIn(r); return;
+      }
+      if (!O.channels || O.user !== u) { const r = await call('web.otpstart', { user: u }); S.otp = { user: u, channels: r.channels }; store.set(CKEY, u); return pLogin('first', u); }
+      const o = digits($('#lOtp').value), s = secretVal('#lPin');
+      if (o.length !== 6) { busy(e.target, false); return toast('กรอกรหัสยืนยัน 6 หลัก', true); }
+      const bad = ownSecretOk(s, ''); if (bad) { busy(e.target, false); return toast(bad, true); }
+      if (s !== secretVal('#lPin2')) { busy(e.target, false); return toast(credTh() + 'ทั้งสองช่องไม่ตรงกัน', true); }
+      const r = await call('web.otpverify', { user: u, otp: o, pin: s });
+      S.otp = null; signIn(r); toast('ยืนยันตัวตนและตั้ง' + credTh() + 'เรียบร้อย'); await afterSignIn(r);
     } catch (x) {
       toast(x.message, true); busy(e.target, false);
-      if (mode === 'login' && (x.first || x.otp)) pLogin(x.first ? 'first' : 'otp', cc);
+      if (mode === 'login' && x.first) { S.otp = null; pLogin('first', u); }
     }
   };
 }
-document.addEventListener('click', e => {
-  const b = e.target.closest('[data-login]'); if (b) { S.otpTo = ''; pLogin(b.dataset.login, ($('#lCode') ? $('#lCode').value.trim().toUpperCase() : '')); }
-  const d = e.target.closest('[data-doc]'); if (d) { S.doc = d.dataset.doc; pLogin('first', ($('#lCode') ? $('#lCode').value.trim().toUpperCase() : '')); }
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-login]'); if (b) { S.otp = null; return pLogin(b.dataset.login, userVal()); }
+  if (e.target.closest('[data-admlogin]')) { e.preventDefault(); S.adminLogin = !S.adminLogin; return pLogin('login', ''); }
+  if (e.target.closest('[data-otpback]')) { S.otp = null; return pLogin('first', userVal()); }
+  if (e.target.closest('[data-otpagain]')) { S.otp.sentTo = ''; return pLogin('first', S.otp.user); }
+  const c = e.target.closest('[data-otpch]');
+  if (c) {
+    busy(c, true, 'กำลังส่งรหัส…');
+    try { const r = await call('web.otp', { user: S.otp.user, ch: c.dataset.otpch }); S.otp.sentTo = r.to; S.otp.ch = r.ch; toast('ส่งรหัสแล้ว'); pLogin('first', S.otp.user); }
+    catch (x) { toast(x.message, true); busy(c, false); }
+  }
 });
-// set / change the secret (forced after a temporary code from HR); the new session replaces the old one
+// where a session goes: the admin console, or the person's page
+async function afterSignIn(r, quiet) {
+  const who = r && r.admin != null ? r : await call('web.check');
+  if (r && r.admin || who.code === '#ADMIN') { S.admin = true; S.me = null; await loadCfg(); return pAdmin(); }
+  S.admin = false; await loadMe(); if (!quiet) toast('เข้าสู่ระบบแล้ว'); start();
+}
+// change one's own secret (the admin: password of 10+); the new session replaces the old one
 function pPin(forced) {
   if (!S.cfg) { loadCfg().then(() => pPin(forced)); return; }
-  const needOld = !forced && S.me && S.me.hasSecret;
-  view(`${forced ? '' : back}<div class="card login"><h2>${forced ? 'ตั้ง' + credTh() + 'ของคุณ' : needOld ? 'เปลี่ยน' + credTh() : 'ตั้ง' + credTh()}</h2>
-    ${forced ? `<div class="note warn">คุณเข้าด้วยรหัสชั่วคราวจากฝ่ายบุคคล กรุณาตั้ง${credTh()}ที่จำได้ก่อนใช้งาน</div>` : ''}
-    ${needOld ? secretInput('pOld', credTh() + 'เดิม', 'current-password', false) : ''}
-    ${secretInput('pNew', credTh() + 'ใหม่', 'new-password', true)}${secretInput('pNew2', 'ยืนยัน' + credTh() + 'ใหม่', 'new-password', true)}
+  const adm = !!S.admin, cr = adm ? 'รหัสผ่าน' : credTh(), needOld = adm || (!forced && S.me && S.me.hasSecret);
+  view(`${forced ? '' : adm ? '<button class="back" data-admin>‹ กลับหน้าผู้ดูแล</button>' : back}<div class="card login"><h2>${forced ? 'ตั้ง' + cr + 'ของคุณ' : 'เปลี่ยน' + cr}</h2>
+    ${needOld ? secretInput('pOld', cr + 'เดิม', 'current-password', false, adm) : ''}
+    ${secretInput('pNew', cr + 'ใหม่', 'new-password', true, adm)}${secretInput('pNew2', 'ยืนยัน' + cr + 'ใหม่', 'new-password', true, adm)}
     <button class="btn big primary" id="pGo">บันทึก</button>
-    <p class="hint">${isPw() ? '8 ตัวขึ้นไป มีทั้งตัวอักษรและตัวเลข ไม่ใช้รหัสพนักงาน' : 'ตัวเลข 6 หลัก ห้ามใช้ 123456, 111111 หรือวันเกิด'} · มือถือเครื่องอื่นที่เข้าสู่ระบบไว้จะต้องเข้าใหม่</p></div>`);
+    <p class="hint">${adm ? '10 ตัวขึ้นไป มีทั้งตัวอักษรและตัวเลข' : isPw() ? '8 ตัวขึ้นไป มีทั้งตัวอักษรและตัวเลข ไม่ใช้รหัสพนักงาน' : 'ตัวเลข 6 หลัก ห้ามใช้ 123456, 111111 หรือวันเกิด'} · เครื่องอื่นที่เข้าสู่ระบบไว้จะต้องเข้าใหม่</p></div>`);
   $('#pGo').onclick = async e => {
-    const s = secretVal('#pNew'), bad = ownSecretOk(s, S.me.emp.Code);
+    const s = secretVal('#pNew', adm), bad = ownSecretOk(s, adm ? '' : S.me.emp.Code, adm);
     if (bad) return toast(bad, true);
-    if (s !== secretVal('#pNew2')) return toast(credTh() + 'ใหม่ทั้งสองช่องไม่ตรงกัน', true);
+    if (s !== secretVal('#pNew2', adm)) return toast(cr + 'ใหม่ทั้งสองช่องไม่ตรงกัน', true);
     busy(e.target, true, 'กำลังบันทึก…');
-    try { signIn(await call('web.pin', { pin: s, old: needOld ? secretVal('#pOld') : '' })); S.me.mustChange = false; S.me.hasSecret = true; toast('บันทึก' + credTh() + 'แล้ว'); start(); }
+    try { signIn(await call('web.pin', { pin: s, old: needOld ? secretVal('#pOld', adm) : '' })); toast('บันทึก' + cr + 'แล้ว'); if (adm) pAdmin(); else { S.me.mustChange = false; S.me.hasSecret = true; start(); } }
     catch (x) { toast(x.message, true); busy(e.target, false); }
   };
 }
-function logout() { if (!confirm('ออกจากระบบบนเครื่องนี้?')) return; signOut(); pLogin(); }
+function logout() {
+  if (S.asFrom) return backToAdmin();
+  if (!confirm('ออกจากระบบบนเครื่องนี้?')) return;
+  signOut(); S.admin = false; S.adminLogin = false; pLogin();
+}
+
+// ---------- admin console (top admin): users, act-as ----------
+const KIND_TH = { code: 'รหัสพนักงาน', email: 'อีเมลบริษัท', idcard: 'เลขบัตรประชาชน', passport: 'หนังสือเดินทาง', admin: 'ผู้ดูแลสูงสุด' };
+async function pAdmin() {
+  S.cur = 'admin';
+  view(`<div class="card hello"><div class="av">🛡</div><div><b>ผู้ดูแลระบบสูงสุด</b><div class="muted">สร้าง / แก้ไขผู้ใช้ · ใช้งานแทนพนักงาน</div></div></div>
+    <div id="adm" class="loading"><i></i>กำลังโหลด…</div>
+    <div class="foot-links"><button class="mini" data-go="pin">🔑 เปลี่ยนรหัสผ่าน</button><button class="mini" data-logout>ออกจากระบบ</button></div>`);
+  try { S.adm = await call('web.admin.list'); admList(); }
+  catch (x) { if (!x.handled && $('#adm')) $('#adm').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
+}
+function admList() {
+  const A = S.adm, q = (S.admQ || '').trim().toLowerCase(), box = $('#adm'); if (!box) return;
+  const rows = A.users.filter(u => !q || [u.code, u.name, u.hint, u.email].join(' ').toLowerCase().includes(q));
+  const free = A.emps.filter(e => !e.hasUser).length;
+  box.className = '';
+  box.innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">ผู้ใช้ ${A.users.length - 1} คน</h2><button class="btn primary" style="width:auto;margin:0" data-uadd ${free ? '' : 'disabled'}>+ เพิ่มผู้ใช้</button></div>
+    <input id="admQ" placeholder="ค้นหา รหัส / ชื่อ / อีเมล" value="${esc(S.admQ || '')}" style="margin-top:10px">
+    <p class="hint">ส่งรหัสยืนยันได้ทาง: ${A.cfg.email ? 'อีเมล' : ''}${A.cfg.email && A.cfg.sms ? ' และ ' : ''}${A.cfg.sms ? 'SMS' : ''}${!A.cfg.email && !A.cfg.sms ? '<b class="bad">ยังไม่ได้เปิด (ตั้งที่โปรแกรม HR)</b>' : ''} · พนักงานที่ยังไม่มีบัญชี ${free} คน</p></div>
+    ${rows.map(u => `<div class="card user"><div class="row"><b>${esc(u.name)}</b><span class="st ${u.status === 'ปิด' ? 'bad' : u.verified ? 'ok' : 'warn'}">${u.status === 'ปิด' ? 'ปิดใช้งาน' : u.verified ? 'ใช้งานได้' : 'ยังไม่ยืนยันตัวตน'}</span></div>
+      <div class="muted">${u.code === '#ADMIN' ? '' : esc(u.code) + ' · '}ชื่อผู้ใช้ (${esc(u.kindTh)}): <b>${esc(u.hint)}</b></div>
+      ${u.code === '#ADMIN' ? '' : `<div class="muted">รับรหัสยืนยัน: ${u.email ? '📧 ' + esc(u.email) : ''} ${u.phone ? '📱 ' + esc(u.phone) : ''}${!u.email && !u.phone ? '<span class="bad">ไม่มีอีเมล/เบอร์</span>' : ''}</div>`}
+      <div class="muted">เข้าใช้ล่าสุด ${u.lastLogin ? esc(thDate(u.lastLogin)) + ' ' + esc(hhmm(String(u.lastLogin).replace(' ', 'T'))) + ' น.' : '-'}</div>
+      <div class="row" style="justify-content:flex-start;margin-top:8px">
+        <button class="mini blue" data-uedit="${esc(u.code)}">แก้ไข</button>
+        ${u.code === '#ADMIN' ? '' : `<button class="mini blue" data-uas="${esc(u.code)}">ใช้งานแทน</button>${u.verified ? `<button class="mini" data-ureset="${esc(u.code)}">ให้ยืนยันตัวตนใหม่</button>` : ''}<button class="mini" data-udel="${esc(u.code)}">ลบ</button>`}
+      </div></div>`).join('')}`;
+  $('#admQ').oninput = e => { S.admQ = e.target.value; const pos = e.target.selectionStart; admList(); const i = $('#admQ'); i.focus(); i.setSelectionRange(pos, pos); };
+}
+// make a user (from an employee without one) or change one; only the top admin can change a username
+function admForm(code) {
+  const A = S.adm, u = code ? A.users.find(x => x.code === code) : null, isAdm = code === '#ADMIN';
+  const emps = A.emps.filter(e => !e.hasUser || (u && e.code === u.code));
+  const e0 = u ? A.emps.find(e => e.code === u.code) : emps[0];
+  const kind = u ? u.kind : 'code';
+  view(`<button class="back" data-admin>‹ กลับหน้าผู้ดูแล</button><div class="card"><h2>${u ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้'}</h2>
+    ${isAdm ? '' : `<label>พนักงาน<select id="uEmp" ${u ? 'disabled' : ''}>${emps.map(e => `<option value="${esc(e.code)}" ${e0 && e.code === e0.code ? 'selected' : ''}>${esc(e.code)} · ${esc(e.name)}</option>`).join('')}</select></label>
+    <label>ชื่อผู้ใช้สร้างจาก<select id="uKind">${['code', 'email', 'idcard', 'passport'].map(k => `<option value="${k}" ${k === kind ? 'selected' : ''}>${KIND_TH[k]}</option>`).join('')}</select></label>`}
+    <label>ชื่อผู้ใช้${u ? ` <span class="muted">(ตอนนี้: ${esc(u.hint)} · เว้นว่าง = ไม่เปลี่ยน)</span>` : ''}<input id="uName" autocapitalize="off" placeholder=""></label>
+    ${isAdm ? '' : `<label>อีเมลบริษัท (รับรหัสยืนยันทางอีเมล)<input id="uMail" type="email" value="${esc(u ? u.email : (e0 && e0.email) || '')}" placeholder="name@company.com"></label>
+    <label>เบอร์มือถือ (รับรหัสทาง SMS)<input id="uPhone" inputmode="tel" value="${esc(u ? u.phone : (e0 && e0.phone) || '')}" placeholder="08xxxxxxxx"></label>
+    <label>สถานะ<select id="uSt"><option value="ใช้งาน">ใช้งาน</option><option value="ปิด" ${u && u.status === 'ปิด' ? 'selected' : ''}>ปิดใช้งาน (เข้าใช้ไม่ได้)</option></select></label>`}
+    <button class="btn big primary" id="uGo">${u ? 'บันทึก' : 'สร้างผู้ใช้'}</button>
+    <p class="hint">${isAdm ? 'ชื่อผู้ใช้ผู้ดูแล: ตัวอักษรอังกฤษ ตัวเลข . _ - ยาว 4-30 ตัว' : 'เลขบัตรประชาชนและหนังสือเดินทางเก็บบนอินเทอร์เน็ตเป็นค่า hash เท่านั้น (แสดงแค่บางหลัก) · เปลี่ยนชื่อผู้ใช้หรือปิดใช้งานแล้ว เครื่องที่เข้าสู่ระบบอยู่จะออกจากระบบทันที · สร้างแล้วแจ้งชื่อผู้ใช้ให้พนักงาน เข้าใช้ครั้งแรกเลือก “ครั้งแรก / ลืมรหัส”'}</p></div>`);
+  const fill = () => { if (!$('#uKind')) return; const k = $('#uKind').value, em = A.emps.find(e => e.code === $('#uEmp').value) || {};
+    $('#uName').placeholder = { code: em.code || 'รหัสพนักงาน', email: 'name@company.com', idcard: 'เลขบัตร 13 หลัก', passport: 'เลขหนังสือเดินทาง' }[k];
+    if (!u && k === 'code') $('#uName').value = em.code || ''; else if (!u && k === 'email') $('#uName').value = $('#uMail').value; else if (!u) $('#uName').value = '';
+    if (!u) { $('#uMail').value = $('#uMail').value || em.email || ''; $('#uPhone').value = $('#uPhone').value || em.phone || ''; } };
+  if ($('#uKind')) { $('#uKind').onchange = fill; $('#uEmp').onchange = () => { $('#uMail').value = ''; $('#uPhone').value = ''; fill(); }; fill(); }
+  else $('#uName').placeholder = 'ชื่อผู้ใช้ใหม่';
+  $('#uGo').onclick = async e => {
+    const b = isAdm ? { code: '#ADMIN', username: $('#uName').value.trim() }
+      : { code: u ? u.code : $('#uEmp').value, kind: $('#uKind').value, username: $('#uName').value.trim(), email: $('#uMail').value.trim(), phone: $('#uPhone').value.trim(), status: $('#uSt').value };
+    if (isAdm && !b.username) return toast('กรอกชื่อผู้ใช้ใหม่', true);
+    busy(e.target, true, 'กำลังบันทึก…');
+    try { await call('web.admin.save', b); toast(u ? 'บันทึกแล้ว' : 'สร้างผู้ใช้แล้ว'); pAdmin(); } catch (x) { toast(x.message, true); busy(e.target, false); }
+  };
+}
+// act-as: the person's page with confidential things hidden; the admin's own session is kept to come back to
+async function actAs(code) {
+  try {
+    const r = await call('web.admin.as', { code });
+    S.asFrom = S.session; S.session = r.session; S.admin = false;
+    await loadMe(); toast('ใช้งานแทน ' + r.name); go('home');
+  } catch (x) { toast(x.message, true); }
+}
+function backToAdmin() { if (!S.asFrom) return; S.session = S.asFrom; S.asFrom = ''; S.me = null; S.admin = true; pAdmin(); }
+document.addEventListener('click', async e => {
+  const t = e.target.closest('[data-uadd],[data-uedit],[data-uas],[data-ureset],[data-udel],[data-admin]'); if (!t) return;
+  if (t.dataset.admin != null) { if (S.asFrom) return backToAdmin(); return pAdmin(); }
+  if (t.dataset.uadd != null) return admForm('');
+  if (t.dataset.uedit) return admForm(t.dataset.uedit);
+  if (t.dataset.uas) return actAs(t.dataset.uas);
+  const code = t.dataset.ureset || t.dataset.udel, del = !!t.dataset.udel, u = S.adm.users.find(x => x.code === code);
+  if (!confirm(del ? `ลบผู้ใช้ของ ${u.name}? พนักงานจะเข้าใช้ไม่ได้จนกว่าจะสร้างใหม่` : `ให้ ${u.name} ยืนยันตัวตนใหม่? รหัสเดิมใช้ไม่ได้ และเครื่องที่เข้าสู่ระบบอยู่จะออกจากระบบ`)) return;
+  busy(t, true, '…');
+  try { await call(del ? 'web.admin.remove' : 'web.admin.reset', { code }); toast(del ? 'ลบผู้ใช้แล้ว' : 'ต้องยืนยันตัวตนใหม่แล้ว'); pAdmin(); } catch (x) { toast(x.message, true); busy(t, false); }
+});
 
 // ---------- add to the home screen (works like an app; Android shows the browser's own install, iPhone needs Share) ----------
 let installEvt = null;
@@ -242,11 +317,11 @@ function pHome() {
   view(`<div class="card hello"><div class="av">${esc((e.Name || '?').replace(/^(นาย|นางสาว|นาง)/, '')[0] || '?')}</div>
       <div><b>${esc(e.Name)}</b>${e.Nick ? ` <span class="muted">(${esc(e.Nick)})</span>` : ''}<div class="muted">${esc(e.Position || '')} · ${esc(e.Unit || '')}</div>
       <div class="muted">${esc(e.Code)}${e.ApproverName ? ' · ผู้อนุมัติ ' + esc(e.ApproverName) : ''}</div></div></div>
-    ${m.dev ? `<div class="note warn"><b>โหมดผู้พัฒนา</b> · ดูหน้าเว็บในชื่อ ${esc(e.Name)} โดยไม่ใช้รหัส (2 ชั่วโมง) · ลงเวลา ส่งคำขอ หรืออนุมัติ ในโหมดนี้เป็นข้อมูลจริง</div>` : ''}
+    ${m.dev ? `<div class="note warn"><b>${S.asFrom ? 'ผู้ดูแลระบบกำลังใช้งานแทน' : 'โหมดผู้พัฒนา'}</b> · ${esc(e.Name)} · ซ่อนข้อมูลส่วนบุคคล (ค่าจ้าง เหตุผล หมายเหตุ เอกสาร รูป ตำแหน่ง) · ลงเวลาแทนไม่ได้ · คำขอ/การอนุมัติที่ทำจะระบุว่าทำแทน${S.asFrom ? '<br><button class="btn" data-admin style="margin-top:8px">‹ กลับหน้าผู้ดูแล</button>' : ''}</div>` : ''}
     ${newsCard()}
     <div class="card today"><div class="row"><b>${thDay(todayIso())}</b>${m.shift ? `<span class="chip">${esc(m.shift.Name)} ${esc(m.shift.Start)}–${esc(m.shift.End)}</span>` : ''}</div>
       ${logs.length ? `<ul class="logs">${logs.map(l => `<li><span class="t ${l.Type === 'IN' ? 'in' : 'out'}">${l.Type === 'IN' ? 'เข้า' : 'ออก'}</span><b>${hhmm(l.CreatedAt)} น.</b>${l.InZone === 'Y' ? '<span class="ok">ในพื้นที่</span>' : `<span class="bad">นอกพื้นที่${l.DistanceM ? ' ' + l.DistanceM + ' ม.' : ''}</span>`}${l.Status === 'รอยืนยัน' ? '<span class="chip warn">รอหัวหน้ายืนยัน</span>' : ''}</li>`).join('')}</ul>` : '<p class="muted">วันนี้ยังไม่ได้ลงเวลา</p>'}
-      <button class="btn big ${nt === 'IN' ? 'primary' : 'out'}" data-go="clock">${nt === 'IN' ? '⏱ ลงเวลาเข้างาน' : '⏱ ลงเวลาออกงาน'}</button></div>
+      ${m.dev ? '<p class="muted">ลงเวลาแทนพนักงานไม่ได้</p>' : `<button class="btn big ${nt === 'IN' ? 'primary' : 'out'}" data-go="clock">${nt === 'IN' ? '⏱ ลงเวลาเข้างาน' : '⏱ ลงเวลาออกงาน'}</button>`}</div>
     <div class="grid">
       <button class="tile" data-go="leave"><i>🗓</i>ขอลา</button>
       <button class="tile" data-go="ot"><i>🌙</i>ขอ OT</button>
@@ -255,7 +330,7 @@ function pHome() {
       ${m.approver ? `<button class="tile ap" data-go="approve"><i>✅</i>รออนุมัติ${m.waiting ? `<em>${m.waiting}</em>` : ''}</button>` : ''}
     </div>
     ${installCard()}
-    <div class="foot-links">${m.dev ? '' : `<button class="mini" data-go="pin">🔑 ${S.me.hasSecret ? 'เปลี่ยน' : 'ตั้ง'}${credTh()}</button>`}<button class="mini" data-logout>${m.dev ? 'ปิดโหมดผู้พัฒนา' : 'ออกจากระบบ'}</button></div>`);
+    <div class="foot-links">${m.dev ? '' : `<button class="mini" data-go="pin">🔑 ${S.me.hasSecret ? 'เปลี่ยน' : 'ตั้ง'}${credTh()}</button>`}<button class="mini" data-logout>${S.asFrom ? 'กลับหน้าผู้ดูแล' : m.dev ? 'ปิดโหมดผู้พัฒนา' : 'ออกจากระบบ'}</button></div>`);
 }
 
 // ---------- check in / out ----------
