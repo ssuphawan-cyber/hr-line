@@ -223,6 +223,7 @@ async function pAdmin() {
   S.cur = 'admin';
   const n = k => `<em id="n-${k}" hidden></em>`;
   view(`${admHead(esc((S.cfg && S.cfg.org) || ''))}
+    ${S.cfg && S.cfg.hrUrl ? `<a class="card notice ap" href="${esc(S.cfg.hrUrl)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit"><b>🏢 ระบบ HR · ทะเบียนพนักงาน เงินเดือน ภาษี สิทธิ์การลา</b><span>เปิดโปรแกรม HR (เข้าด้วยบัญชีของโปรแกรม HR) ›</span></a>` : ''}
     <div class="grid">
       <button class="tile ap" data-admgo="waiting"><i>⏳</i>รออนุมัติทั้งหมด${n('waiting')}</button>
       <button class="tile" data-admgo="today"><i>🕘</i>ลงเวลาวันนี้</button>
