@@ -55,3 +55,6 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--acc); borde
 .login .btn + .btn { margin-top: 8px; }
 .mini.blue { color: var(--pri); } .card.user { padding: 12px 14px; } .card.user .row + .muted { margin-top: 2px; } .card.user .mini { margin: 0 6px 4px 0; }
 #admQ { margin-top: 10px; }
+.item.pick { display: block; width: 100%; text-align: left; font: inherit; background: none; border: 0; border-top: 1px solid var(--line); padding: 10px 2px; color: var(--text); } .item.pick:active { background: #f3f5fa; }
+#asQ { margin-bottom: 6px; }
+.t-in { color: var(--ok); font-weight: 600; } .t-out { color: var(--out); font-weight: 600; }

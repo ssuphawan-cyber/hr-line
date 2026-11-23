@@ -194,7 +194,7 @@ async function afterSignIn(r, quiet) {
 function pPin(forced) {
   if (!S.cfg) { loadCfg().then(() => pPin(forced)); return; }
   const adm = !!S.admin, cr = adm ? 'รหัสผ่าน' : credTh(), needOld = adm || (!forced && S.me && S.me.hasSecret);
-  view(`${forced ? '' : adm ? '<button class="back" data-admin>‹ กลับหน้าผู้ดูแล</button>' : back}<div class="card login"><h2>${forced ? 'ตั้ง' + cr + 'ของคุณ' : 'เปลี่ยน' + cr}</h2>
+  view(`${forced ? '' : adm ? admBack : back}<div class="card login"><h2>${forced ? 'ตั้ง' + cr + 'ของคุณ' : 'เปลี่ยน' + cr}</h2>
     ${needOld ? secretInput('pOld', cr + 'เดิม', 'current-password', false, adm) : ''}
     ${secretInput('pNew', cr + 'ใหม่', 'new-password', true, adm)}${secretInput('pNew2', 'ยืนยัน' + cr + 'ใหม่', 'new-password', true, adm)}
     <button class="btn big primary" id="pGo">บันทึก</button>
@@ -216,14 +216,74 @@ function logout() {
 
 // ---------- admin console (top admin): users, act-as ----------
 const KIND_TH = { code: 'รหัสพนักงาน', email: 'อีเมลบริษัท', idcard: 'เลขบัตรประชาชน', passport: 'หนังสือเดินทาง', admin: 'ผู้ดูแลสูงสุด' };
+const admBack = '<button class="back" data-admin>‹ เมนูผู้ดูแล</button>';
+const admHead = sub => `<div class="card hello"><div class="av">🛡</div><div><b>ผู้ดูแลระบบสูงสุด</b><div class="muted">${sub}</div></div></div>`;
+// the admin's home: the menu (counts filled in when they come back)
 async function pAdmin() {
   S.cur = 'admin';
-  view(`<div class="card hello"><div class="av">🛡</div><div><b>ผู้ดูแลระบบสูงสุด</b><div class="muted">สร้าง / แก้ไขผู้ใช้ · ใช้งานแทนพนักงาน</div></div></div>
-    <div id="adm" class="loading"><i></i>กำลังโหลด…</div>
-    <div class="foot-links"><button class="mini" data-go="pin">🔑 เปลี่ยนรหัสผ่าน</button><button class="mini" data-logout>ออกจากระบบ</button></div>`);
+  const n = k => `<em id="n-${k}" hidden></em>`;
+  view(`${admHead(esc((S.cfg && S.cfg.org) || ''))}
+    <div class="grid">
+      <button class="tile ap" data-admgo="waiting"><i>⏳</i>รออนุมัติทั้งหมด${n('waiting')}</button>
+      <button class="tile" data-admgo="today"><i>🕘</i>ลงเวลาวันนี้</button>
+      <button class="tile" data-admgo="all"><i>📋</i>คำขอทั้งหมด<span class="muted" style="display:block;font-weight:400;font-size:12px">30 วันล่าสุด</span></button>
+      <button class="tile" data-admgo="as"><i>🧑‍💼</i>ใช้งานแทนพนักงาน<span class="muted" style="display:block;font-weight:400;font-size:12px">เมนูของพนักงานทั้งหมด</span></button>
+      <button class="tile" data-admgo="users"><i>👥</i>ผู้ใช้${n('users')}</button>
+      <button class="tile" data-go="pin"><i>🔑</i>เปลี่ยนรหัสผ่าน</button>
+    </div>
+    <p class="hint center">ข้อมูลส่วนบุคคล (ค่าจ้าง เหตุผล หมายเหตุ เอกสาร รูป ตำแหน่ง) ถูกซ่อนในทุกหน้าของผู้ดูแล</p>
+    <div class="foot-links"><button class="mini" data-logout>ออกจากระบบ</button></div>`);
+  try {
+    const [L, W] = await Promise.all([call('web.admin.list'), call('web.admin.overview', { what: 'waiting' })]);
+    S.adm = L; if (S.cur !== 'admin') return;
+    const set = (k, v) => { const el = $('#n-' + k); if (el && v) { el.textContent = v; el.hidden = false; } };
+    set('waiting', W.rows.length); set('users', L.users.length - 1);
+  } catch (x) { if (!x.handled) toast(x.message, true); }
+}
+async function pAdmUsers() {
+  S.cur = 'admusers';
+  view(`${admBack}${admHead('ผู้ใช้ · สร้าง / แก้ไข / ใช้งานแทน')}<div id="adm" class="loading"><i></i>กำลังโหลด…</div>`);
   try { S.adm = await call('web.admin.list'); admList(); }
   catch (x) { if (!x.handled && $('#adm')) $('#adm').innerHTML = `<p class="bad">${esc(x.message)}</p>`; }
 }
+// pick a person to act as (everyone still working; with or without a user)
+async function pAdmAs() {
+  S.cur = 'admas';
+  view(`${admBack}<div class="card"><h2>ใช้งานแทนพนักงาน</h2><p class="hint" style="margin-top:0">เปิดเมนูของพนักงานคนนั้นทั้งหมด (1 ชั่วโมง) · ซ่อนข้อมูลส่วนบุคคล · ลงเวลาแทนไม่ได้ · คำขอ/การอนุมัติที่ทำจะระบุว่าทำแทน</p>
+    <input id="asQ" placeholder="ค้นหา รหัส / ชื่อ / หน่วยงาน"><div id="asList" class="loading"><i></i>กำลังโหลด…</div></div>`);
+  try { if (!S.adm) S.adm = await call('web.admin.list'); } catch (x) { if (!x.handled) toast(x.message, true); return; }
+  const draw = () => { const q = ($('#asQ').value || '').toLowerCase(), box = $('#asList'); if (!box) return; box.className = '';
+    box.innerHTML = S.adm.emps.filter(e => !q || [e.code, e.name, e.unit, e.pos].join(' ').toLowerCase().includes(q))
+      .map(e => `<button class="item pick" data-uas="${esc(e.code)}"><b>${esc(e.name)}</b><div class="muted">${esc(e.code)} · ${esc(e.pos || '')} · ${esc(e.unit || '')}${e.hasUser ? '' : ' · ยังไม่มีบัญชี'}</div></button>`).join('') || '<p class="muted">ไม่พบ</p>'; };
+  $('#asQ').oninput = draw; draw();
+}
+// company-wide lists for the admin (confidential things come back hidden)
+async function pAdmView(what) {
+  S.cur = 'adm-' + what;
+  const title = { waiting: 'รออนุมัติทั้งหมด', all: 'คำขอทั้งหมด · 30 วันล่าสุด', today: 'ลงเวลาวันนี้ · ' + thDay(todayIso()) }[what];
+  view(`${admBack}<div class="card"><h2>${title}</h2><div id="ov" class="loading"><i></i>กำลังโหลด…</div></div>`);
+  let r; try { r = await call('web.admin.overview', { what }); } catch (x) { if (!x.handled && $('#ov')) $('#ov').innerHTML = `<p class="bad">${esc(x.message)}</p>`; return; }
+  const box = $('#ov'); if (!box) return; box.className = '';
+  if (what === 'today') {
+    const by = {}; r.rows.forEach(l => (by[l.Emp] = by[l.Emp] || []).push(l));
+    const came = r.team.filter(e => by[e.Code]), not = r.team.filter(e => !by[e.Code]);
+    box.innerHTML = `<p class="muted">ลงเวลาแล้ว ${came.length} · ยังไม่ลงเวลา ${not.length} จาก ${r.team.length} คน</p>
+      ${came.map(e => `<div class="item"><b>${esc(e.Name)}</b> <span class="muted">${esc(e.Code)}</span><div>${by[e.Code].map(l => `<span class="t-${l.Type === 'IN' ? 'in' : 'out'}">${l.Type === 'IN' ? 'เข้า' : 'ออก'} ${hhmm(l.CreatedAt)}</span>${l.InZone === 'Y' ? '' : ' <span class="bad">นอกพื้นที่</span>'}${l.Status === 'รอยืนยัน' ? ' <span class="chip warn">รอยืนยัน</span>' : ''}`).join(' · ')}</div></div>`).join('')}
+      ${not.length ? `<div class="item"><b>ยังไม่ลงเวลา</b><div class="muted">${not.map(e => esc(e.Name)).join(' · ')}</div></div>` : ''}`;
+    return;
+  }
+  box.innerHTML = r.rows.length ? r.rows.map(x => `<div class="item"><div class="row"><span class="kind">${x.sheet === 'TimeLog' ? 'ลงเวลานอกพื้นที่' : KIND[x.sheet]}</span><span class="st ${stCls(x.Status)}">${esc(x.Status)}</span></div>
+      <b>${esc(x.EmpName)}</b> <span class="muted">${esc(x.Emp)}</span><div>${esc(summary(x))}</div>
+      <div class="muted">ผู้อนุมัติ ${esc(x.ApproverName || '-')} · ส่งเมื่อ ${thDate(x.CreatedAt)} ${hhmm(String(x.CreatedAt).replace(' ', 'T'))} น.</div></div>`).join('')
+    : `<p class="muted">${what === 'waiting' ? 'ไม่มีรายการรออนุมัติ 🎉' : 'ไม่มีคำขอใน 30 วันล่าสุด'}</p>`;
+}
+document.addEventListener('click', e => {
+  const g = e.target.closest('[data-admgo]'); if (!g) return;
+  const k = g.dataset.admgo;
+  if (k === 'users') return pAdmUsers();
+  if (k === 'as') return pAdmAs();
+  return pAdmView(k);
+});
 function admList() {
   const A = S.adm, q = (S.admQ || '').trim().toLowerCase(), box = $('#adm'); if (!box) return;
   const rows = A.users.filter(u => !q || [u.code, u.name, u.hint, u.email].join(' ').toLowerCase().includes(q));
@@ -248,7 +308,7 @@ function admForm(code) {
   const emps = A.emps.filter(e => !e.hasUser || (u && e.code === u.code));
   const e0 = u ? A.emps.find(e => e.code === u.code) : emps[0];
   const kind = u ? u.kind : 'code';
-  view(`<button class="back" data-admin>‹ กลับหน้าผู้ดูแล</button><div class="card"><h2>${u ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้'}</h2>
+  view(`<button class="back" data-admgo="users">‹ ผู้ใช้</button><div class="card"><h2>${u ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้'}</h2>
     ${isAdm ? '' : `<label>พนักงาน<select id="uEmp" ${u ? 'disabled' : ''}>${emps.map(e => `<option value="${esc(e.code)}" ${e0 && e.code === e0.code ? 'selected' : ''}>${esc(e.code)} · ${esc(e.name)}</option>`).join('')}</select></label>
     <label>ชื่อผู้ใช้สร้างจาก<select id="uKind">${['code', 'email', 'idcard', 'passport'].map(k => `<option value="${k}" ${k === kind ? 'selected' : ''}>${KIND_TH[k]}</option>`).join('')}</select></label>`}
     <label>ชื่อผู้ใช้${u ? ` <span class="muted">(ตอนนี้: ${esc(u.hint)} · เว้นว่าง = ไม่เปลี่ยน)</span>` : ''}<input id="uName" autocapitalize="off" placeholder=""></label>
@@ -268,7 +328,7 @@ function admForm(code) {
       : { code: u ? u.code : $('#uEmp').value, kind: $('#uKind').value, username: $('#uName').value.trim(), email: $('#uMail').value.trim(), phone: $('#uPhone').value.trim(), status: $('#uSt').value };
     if (isAdm && !b.username) return toast('กรอกชื่อผู้ใช้ใหม่', true);
     busy(e.target, true, 'กำลังบันทึก…');
-    try { await call('web.admin.save', b); toast(u ? 'บันทึกแล้ว' : 'สร้างผู้ใช้แล้ว'); pAdmin(); } catch (x) { toast(x.message, true); busy(e.target, false); }
+    try { await call('web.admin.save', b); toast(u ? 'บันทึกแล้ว' : 'สร้างผู้ใช้แล้ว'); pAdmUsers(); } catch (x) { toast(x.message, true); busy(e.target, false); }
   };
 }
 // act-as: the person's page with confidential things hidden; the admin's own session is kept to come back to
@@ -289,7 +349,7 @@ document.addEventListener('click', async e => {
   const code = t.dataset.ureset || t.dataset.udel, del = !!t.dataset.udel, u = S.adm.users.find(x => x.code === code);
   if (!confirm(del ? `ลบผู้ใช้ของ ${u.name}? พนักงานจะเข้าใช้ไม่ได้จนกว่าจะสร้างใหม่` : `ให้ ${u.name} ยืนยันตัวตนใหม่? รหัสเดิมใช้ไม่ได้ และเครื่องที่เข้าสู่ระบบอยู่จะออกจากระบบ`)) return;
   busy(t, true, '…');
-  try { await call(del ? 'web.admin.remove' : 'web.admin.reset', { code }); toast(del ? 'ลบผู้ใช้แล้ว' : 'ต้องยืนยันตัวตนใหม่แล้ว'); pAdmin(); } catch (x) { toast(x.message, true); busy(t, false); }
+  try { await call(del ? 'web.admin.remove' : 'web.admin.reset', { code }); toast(del ? 'ลบผู้ใช้แล้ว' : 'ต้องยืนยันตัวตนใหม่แล้ว'); pAdmUsers(); } catch (x) { toast(x.message, true); busy(t, false); }
 });
 
 // ---------- add to the home screen (works like an app; Android shows the browser's own install, iPhone needs Share) ----------
