@@ -35,7 +35,7 @@ async function call(action, data = {}) {
   }
   return j;
 }
-function signIn(r) { S.session = r.session; store.set(SKEY, r.session); }
+function signIn(r) { S.session = r.session; if (!(S.me && S.me.dev)) store.set(SKEY, r.session); }
 function signOut() { S.session = ''; S.me = null; store.set(SKEY, ''); }
 function toast(msg, err) {
   if (msg === 'stale') return;   // a late answer to a screen that is gone (see call)
@@ -50,6 +50,9 @@ const back = `<button class="back" data-go="home">‹ กลับหน้า�
 async function boot() {
   const q = new URLSearchParams(location.search);
   S.page = q.get('p') || 'home';
+  // developer / HR check from the program: #dev=<2-hour session> (kept in this tab only, never saved on the device)
+  const dv = /^#dev=([\w.-]+)$/.exec(location.hash);
+  if (dv) { S.session = dv[1]; history.replaceState(null, '', location.pathname + location.search); }
   if (!C.GAS_URL) return view(`<div class="card err-card"><h2>ยังไม่ได้ตั้งค่า</h2><p>ใส่ GAS_URL ในไฟล์ config.js</p></div>`);
   if (!S.session) { await loadCfg(); return pLogin(); }
   try { await loadMe(); start(); loadCfg(); }
@@ -239,6 +242,7 @@ function pHome() {
   view(`<div class="card hello"><div class="av">${esc((e.Name || '?').replace(/^(นาย|นางสาว|นาง)/, '')[0] || '?')}</div>
       <div><b>${esc(e.Name)}</b>${e.Nick ? ` <span class="muted">(${esc(e.Nick)})</span>` : ''}<div class="muted">${esc(e.Position || '')} · ${esc(e.Unit || '')}</div>
       <div class="muted">${esc(e.Code)}${e.ApproverName ? ' · ผู้อนุมัติ ' + esc(e.ApproverName) : ''}</div></div></div>
+    ${m.dev ? `<div class="note warn"><b>โหมดผู้พัฒนา</b> · ดูหน้าเว็บในชื่อ ${esc(e.Name)} โดยไม่ใช้รหัส (2 ชั่วโมง) · ลงเวลา ส่งคำขอ หรืออนุมัติ ในโหมดนี้เป็นข้อมูลจริง</div>` : ''}
     ${newsCard()}
     <div class="card today"><div class="row"><b>${thDay(todayIso())}</b>${m.shift ? `<span class="chip">${esc(m.shift.Name)} ${esc(m.shift.Start)}–${esc(m.shift.End)}</span>` : ''}</div>
       ${logs.length ? `<ul class="logs">${logs.map(l => `<li><span class="t ${l.Type === 'IN' ? 'in' : 'out'}">${l.Type === 'IN' ? 'เข้า' : 'ออก'}</span><b>${hhmm(l.CreatedAt)} น.</b>${l.InZone === 'Y' ? '<span class="ok">ในพื้นที่</span>' : `<span class="bad">นอกพื้นที่${l.DistanceM ? ' ' + l.DistanceM + ' ม.' : ''}</span>`}${l.Status === 'รอยืนยัน' ? '<span class="chip warn">รอหัวหน้ายืนยัน</span>' : ''}</li>`).join('')}</ul>` : '<p class="muted">วันนี้ยังไม่ได้ลงเวลา</p>'}
@@ -251,7 +255,7 @@ function pHome() {
       ${m.approver ? `<button class="tile ap" data-go="approve"><i>✅</i>รออนุมัติ${m.waiting ? `<em>${m.waiting}</em>` : ''}</button>` : ''}
     </div>
     ${installCard()}
-    <div class="foot-links"><button class="mini" data-go="pin">🔑 ${S.me.hasSecret ? 'เปลี่ยน' : 'ตั้ง'}${credTh()}</button><button class="mini" data-logout>ออกจากระบบ</button></div>`);
+    <div class="foot-links">${m.dev ? '' : `<button class="mini" data-go="pin">🔑 ${S.me.hasSecret ? 'เปลี่ยน' : 'ตั้ง'}${credTh()}</button>`}<button class="mini" data-logout>${m.dev ? 'ปิดโหมดผู้พัฒนา' : 'ออกจากระบบ'}</button></div>`);
 }
 
 // ---------- check in / out ----------
